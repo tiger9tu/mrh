@@ -59,15 +59,22 @@ def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0_f=None,
     log.info ('LASCI object has %d degrees of freedom', psi.nvar)
     h = [ecore, h1, h2]
     psi_callback = psi.get_solver_callback (h)
-    res = optimize.minimize (psi.e_de, psi.x, args=(h,), method='BFGS',
+
+    param_x = psi.x
+    if frozen is not None and frozen.upper() == 'CI':
+        param_x = psi.x[:psi.nconstr + psi.uop.ngen_uniq]
+    
+    res = optimize.minimize (psi.e_de, param_x, args=(h,), method='BFGS',
         jac=True, callback=psi_callback, options=psi_options)
 
+    res_x = np.concatenate([res.x, psi.x[len(res.x):]])
+    
     fci.converged = res.success
-    e_tot = psi.energy_tot (res.x, h)
-    ci1 = psi.get_fcivec (res.x)
+    e_tot = psi.energy_tot (res_x, h)
+    ci1 = psi.get_fcivec (res_x)
     if verbose>=lib.logger.DEBUG:
         psi.uop.print_tab (_print_fn=log.debug)
-        psi.print_x (res.x, h, _print_fn=log.debug)
+        psi.print_x (res_x, h, _print_fn=log.debug)
     if verbose>=lib.logger.INFO:
         dm1s, dm2s = fci.make_rdm12s (ci1, norb, nelec)
         dm1s = np.stack (dm1s, axis=0)
@@ -78,7 +85,7 @@ def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0_f=None,
             _n_m_s (dm1s[:,i:j,i:j], dm2s[:,i:j,i:j,i:j,i:j], _print_fn=log.info)
         log.info ('Whole system quantum numbers')
         _n_m_s (dm1s, dm2s, _print_fn=log.info)
-    psi.x = res.x
+    psi.x = res_x
     psi.converged = res.success
     psi.finalize_()
     fci.psi = psi
@@ -218,6 +225,7 @@ class LASUCCTrialState (object):
                 self.var_mask[i:] = False
             else:
                 self.var_mask[frozen] = False
+        self.frozen = frozen
         self.x = np.zeros (self.nvar)
         self.converged = False
         self._e_last = None
@@ -247,14 +255,21 @@ class LASUCCTrialState (object):
         #            print (fockspace.onv_str (deta, detb, norb), c_flip[det])
         return (c * sgn).reshape (c_shape)
 
-    def pack (self, xconstr, xcc, xci_f):
+    def pack (self, xconstr, xcc, xci_f=None):
         x = [xconstr, xcc]
-        ci0_f = self.ci_f
-        for xci, ci0 in zip (xci_f, ci0_f):
-            cHx = ci0.conj ().ravel ().dot (xci.ravel ())
-            x.append ((xci - (ci0*cHx)).ravel ())
+        if xci_f is not None:
+            ci0_f = self.ci_f
+            for xci, ci0 in zip (xci_f, ci0_f):
+                cHx = ci0.conj ().ravel ().dot (xci.ravel ())
+                x.append ((xci - (ci0*cHx)).ravel ())
         x = np.concatenate (x)
-        return x[self.var_mask]
+        return x[self.var_mask[:len(x)]]
+    
+
+    # def pack_without_ci (self, xconstr, xcc):
+    #     x = [xconstr, xcc]
+    #     x = np.concatenate (x)
+    #     return x[self.var_mask[:len(x)]]
 
     def unpack (self, x_):
         x = np.zeros (self.nvar_tot)
@@ -280,6 +295,9 @@ class LASUCCTrialState (object):
         return np.count_nonzero (self.var_mask)
 
     def e_de (self, x, h):
+        if self.frozen is not None and self.frozen.upper() == 'CI':
+            x = np.concatenate([x, self.x[len(x):]])
+
         log = self.log
         t0 = (time.process_time (), time.time ())
         c, uc, huc, uhuc, c_f = self.hc_x (x, h)
@@ -287,6 +305,16 @@ class LASUCCTrialState (object):
         jac = self.jac (x, h, c=c, uc=uc, huc=huc, uhuc=uhuc, c_f=c_f)
         log.timer ('las_obj full ene+jac eval', *t0)
         return e_tot, jac
+    
+    # def e_de_without_ci (self, x, h):
+    #     x = np.concatenate([x, self.x[len(x):]])
+    #     log = self.log
+    #     t0 = (time.process_time (), time.time ())
+    #     c, uc, huc, uhuc, c_f = self.hc_x (x, h)
+    #     e_tot = self.energy_tot (x, h, uc=uc, huc=huc)
+    #     jac = self.jac (x, h, c=c, uc=uc, huc=huc, uhuc=uhuc, c_f=c_f)
+    #     log.timer ('las_obj full ene+jac eval', *t0)
+    #     return e_tot, jac
 
     def energy_tot (self, x, h, uc=None, huc=None):
         log = self.log
@@ -305,6 +333,33 @@ class LASUCCTrialState (object):
         self._e_last = e_tot
         return e_tot
 
+    # python
+    # ...existing code...
+    # def jac(self, x, h, c=None, uc=None, huc=None, uhuc=None, c_f=None, freeze_ci=False):
+    #     norm_x = linalg.norm(x)
+    #     log = self.log
+    #     t0 = (time.process_time(), time.time())
+    #     if any([x is None for x in [c, uc, huc, uhuc, c_f]]):
+    #         c, uc, huc, uhuc, c_f = self.hc_x(x, h)
+    #     jacconstr = self.get_jac_constr(uc)
+    #     t1 = log.timer('las_obj constr jac', *t0)
+    #     jact1 = self.get_jac_t1(x, h, c=c, huc=huc, uhuc=uhuc)
+    #     t1 = log.timer('las_obj ucc jac', *t1)
+    #     if freeze_ci:
+    #         # Replace CI Jacobian with zeros of the correct shape
+    #         xconstr, xcc, xci_f = self.unpack(x)
+    #         jacci_f = [np.zeros_like(xci) for xci in xci_f]
+    #     else:
+    #         jacci_f = self.get_jac_ci(x, h, uhuc=uhuc, uci_f=c_f)
+    #     t1 = log.timer('las_obj ci jac', *t1)
+    #     log.timer('las_obj jac eval', *t0)
+    #     g = self.pack(jacconstr, jact1, jacci_f)
+    #     norm_g = linalg.norm(g)
+    #     log.debug('|gradient| = %e, |x| = %e', norm_g, norm_x)
+    #     self._jac_last = g
+    #     return g
+    # ...existing code...
+
     def jac (self, x, h, c=None, uc=None, huc=None, uhuc=None, c_f=None):
         norm_x = linalg.norm (x)
         log = self.log
@@ -315,12 +370,22 @@ class LASUCCTrialState (object):
         # number symmetry
         jacconstr = self.get_jac_constr (uc)
         t1 = log.timer ('las_obj constr jac', *t0)
+        
         jact1 = self.get_jac_t1 (x, h, c=c, huc=huc, uhuc=uhuc)
         t1 = log.timer ('las_obj ucc jac', *t1)
-        jacci_f = self.get_jac_ci (x, h, uhuc=uhuc, uci_f=c_f)
+
+
+        
+        xconstr, xcc, xci_f = self.unpack(x)
         t1 = log.timer ('las_obj ci jac', *t1)
         log.timer ('las_obj jac eval', *t0)
-        g = self.pack (jacconstr, jact1, jacci_f)
+
+        if self.frozen is not None and self.frozen.upper() == 'CI':
+            g = self.pack(jacconstr, jact1)
+        else:
+            jacci_f = self.get_jac_ci (x, h, uhuc=uhuc, uci_f=c_f)
+            g = self.pack (jacconstr, jact1, jacci_f)
+        
         norm_g = linalg.norm (g)
         log.debug ('|gradient| = %e, |x| = %e',norm_g, norm_x)
         self._jac_last = g

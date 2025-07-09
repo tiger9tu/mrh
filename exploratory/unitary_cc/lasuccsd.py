@@ -47,9 +47,10 @@ class FCISolver_USCC(lasci_ominus1.FCISolver):
         self.a_idxs = a_idxs
         self.i_idxs = i_idxs
     def get_uop(self, norb, nlas, t1_s2sym=None):
-        if getattr(self, 'frozen', '').upper() == 'CI':
-            return uccsd_sym1.get_uccsd_op2(norb, epsilon=0.0)
-        else:
-            return gen_usccsd_op(norb, nlas, self.a_idxs, self.i_idxs)
+        return gen_usccsd_op(norb, nlas, self.a_idxs, self.i_idxs)
+        # if getattr(self, 'frozen', '').upper() == 'CI':
+        #    return uccsd_sym1.get_uccsd_op2(norb, epsilon=0.0)
+        # else:
+        #    return gen_usccsd_op(norb, nlas, self.a_idxs, self.i_idxs)
             #Just pass in norb, nlas, a_idxs_lst, i_idxs_lst
 
