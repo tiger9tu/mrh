@@ -34,12 +34,13 @@ def _n_m_s (dm1s, dm2s, _print_fn=print):
 
 # SV change to max_cycle=15000 to optimize the energy in the kernel right below
 GLOBAL_MAX_CYCLE = None
-def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0_f=None,
+def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0 = None, ci0_f=None,
             tol=1e-8, gtol=1e-6, max_cycle=None, 
             orbsym=None, wfnsym=None, ecore=0, **kwargs):
     if max_cycle is None:
         max_cycle = GLOBAL_MAX_CYCLE if GLOBAL_MAX_CYCLE is not None else 15000
     if norb_f is None: norb_f = getattr (fci, 'norb_f', [norb])
+    ci0_f = ci0 # my change
     if ci0_f is None: ci0_f = fci.get_init_guess (norb, nelec, norb_f, h1, h2)
     verbose = kwargs.get ('verbose', getattr (fci, 'verbose', 0))
 
@@ -50,20 +51,26 @@ def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0_f=None,
         log = lib.logger.new_logger (fci, verbose)
 
     frozen = getattr (fci, 'frozen', None)
+
     psi = getattr (fci, 'psi', fci.build_psi (ci0_f, norb, norb_f, nelec,
         log=log, frozen=frozen))
+    
+    
     assert (psi.check_ci0_constr)
     psi_options = {'gtol':     gtol,
                    'maxiter':  max_cycle,
                    'disp':     verbose>lib.logger.DEBUG}
     log.info ('LASCI object has %d degrees of freedom', psi.nvar)
     h = [ecore, h1, h2]
+
     psi_callback = psi.get_solver_callback (h)
 
     param_x = psi.x
     if frozen is not None and frozen.upper() == 'CI':
         param_x = psi.x[:psi.nconstr + psi.uop.ngen_uniq]
     
+
+    print("before optimization, energy = ", psi.energy_tot(param_x, h))
     res = optimize.minimize (psi.e_de, param_x, args=(h,), method='BFGS',
         jac=True, callback=psi_callback, options=psi_options)
 
