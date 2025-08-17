@@ -334,8 +334,8 @@ class UCCSD (UCCS):
 
 
 if __name__ == '__main__':
-    # norb = 4
-    # nelec = 4
+    norb = 4
+    nelec = 4
     def pbin (n, k=norb):
         s = bin (n)[2:]
         m = (2*k) - len (s)

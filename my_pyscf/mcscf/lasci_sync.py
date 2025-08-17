@@ -62,7 +62,15 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
     t2 = (t1[0], t1[1])
     it = 0
     for it in range (las.max_cycle_macro):
-        e_cas, ci1 = ci_cycle (las, mo_coeff, ci1, veff, h2eff_sub, casdm1frs, log)
+        e_cas_all, ci_all = ci_cycle (las, mo_coeff, ci1, veff, h2eff_sub, casdm1frs, log)
+        # e_cas, ci1 = ci_cycle (las, mo_coeff, ci1, veff, h2eff_sub, casdm1frs, log)
+        if las.bin_excite:
+            e_cas = e_cas_all
+            ci1 = ci_all[0]
+            ci2 = ci_all[1]
+        else:
+            e_cas = e_cas_all
+            ci1 = ci_all
         if ugg is None: ugg = las.get_ugg (mo_coeff, ci1)
         log.info ('LASCI subspace CI energies: {}'.format (e_cas))
         t1 = log.timer ('LASCI ci_cycle', *t1)
@@ -90,6 +98,10 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             if las.verbose > lib.logger.DEBUG:
                 errmat = veff - veff_new
                 lib.logger.debug (las, 'fast_veffa error: {}'.format (linalg.norm (errmat)))
+
+        # print("veff = \n", veff)
+        # print("h2eff = \n", h2eff_sub)
+        # print("mo_coeff = \n", mo_coeff)
         veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
         casdm1s_sub = casdm1s_new
 
@@ -254,8 +266,11 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
     t0 = log.timer ('LASCI kernel function', *t0)
 
     las.dump_chk (mo_coeff=mo_coeff, ci=ci1)
+    final_ci = ci1
+    if las.bin_excite:
+        final_ci = [ci1, ci2]
 
-    return converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, ci1, h2eff_sub, veff
+    return converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, final_ci, h2eff_sub, veff
 
 def ci_cycle (las, mo, ci0, veff, h2eff_sub, casdm1frs, log):
     if ci0 is None: ci0 = [None for idx in range (las.nfrags)]
@@ -267,6 +282,7 @@ def ci_cycle (las, mo, ci0, veff, h2eff_sub, casdm1frs, log):
     ncas_cum = np.cumsum ([0] + las.ncas_sub.tolist ()) + las.ncore
     e_cas = []
     ci1 = []
+    ci2 = []
     e0 = 0.0 
     for isub, (fcibox, ncas, nelecas, h1e, fcivec) in enumerate (zip (las.fciboxes, las.ncas_sub,
                                                                       las.nelecas_sub, h1eff_sub,
@@ -297,16 +313,27 @@ def ci_cycle (las, mo, ci0, veff, h2eff_sub, casdm1frs, log):
                                                                                 wfnsym_str))
 
         if isub not in frozen_ci:
-            e_sub, fcivec = fcibox.kernel(h1e, eri_cas, ncas, nelecas,
+            e_sub, fcivec_all = fcibox.kernel(h1e, eri_cas, ncas, nelecas,
                                           ci0=fcivec, verbose=log,
                                           max_memory = max_memory,
-                                          ecore=e0, orbsym=orbsym)
+                                          ecore=e0, orbsym=orbsym, bin_excite=las.bin_excite)
+
         else:
             e_sub = 0 # TODO: proper energy calculation (probably doesn't matter tho)
+        
         e_cas.append (e_sub)
-        ci1.append (fcivec)
+        # print("fcivecall = \n", fcivec_all)
+        if las.bin_excite is True:
+            ci1.append ([fcivec_all[0]])
+            ci2.append ([fcivec_all[1]])
+        else:
+            ci1.append (fcivec_all)
         t1 = log.timer ('FCI box for subspace {}'.format (isub), *t1)
-    return e_cas, ci1
+    
+    if las.bin_excite:
+        return e_cas, [ci1, ci2]
+    else:
+        return e_cas, ci1
 
 def all_nonredundant_idx (nmo, ncore, ncas_sub):
     ''' Generate a index mask array addressing all nonredundant, lower-triangular elements of an

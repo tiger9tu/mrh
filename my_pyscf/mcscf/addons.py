@@ -85,6 +85,7 @@ def get_h1e_zipped_fcisolver (fcisolver):
 
         def kernel(self, h1, h2, norb, nelec, ci0=None, verbose=0, ecore=0, orbsym=None, **kwargs):
             # Note self.orbsym is initialized lazily in mc1step_symm.kernel function
+            bin_excite = kwargs.pop ('bin_excite', False)
             log = logger.new_logger(self, verbose)
             es = []
             cs = []
@@ -95,14 +96,24 @@ def get_h1e_zipped_fcisolver (fcisolver):
                 c0 = my_args[0]
                 h1e = my_args[1]
                 e0 = my_args[2]
+
+                # solver.nroots = 2 if bin_excite else 1
+                my_nroots = 2 if bin_excite else 1
                 e, c = solver.kernel(h1e, h2, norb, self._get_nelec(solver, nelec), c0,
-                                     orbsym=orbsym, verbose=log, ecore=e0, **kwargs)
-                if solver.nroots == 1:
-                    es.append(e)
-                    cs.append(c)
+                                     orbsym=orbsym, verbose=log, ecore=e0, nroots=my_nroots, **kwargs)
+
+                if bin_excite:
+                    es.append(e[0])
+                    es.append(e[1])
+                    cs.append(c[0])
+                    cs.append(c[1])
                 else:
-                    es.extend(e)
-                    cs.extend(c)
+                    if solver.nroots == 1:
+                        es.append(e)
+                        cs.append(c)
+                    else:
+                        es.extend(e)
+                        cs.extend(c)
             self.e_states = es
             self.converged = np.all(getattr(sol, 'converged', True)
                                        for sol in self.fcisolvers)

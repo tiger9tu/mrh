@@ -932,6 +932,12 @@ class LASCINoSymm (casci.CASCI):
         self.max_cycle_macro = 50
         self.max_cycle_micro = 5
         self.min_cycle_macro = 0
+
+        # if this is ture, then return the ground state and 
+        # first excited states of the fragment H for each 
+        # fragment, and finally return the states, where each
+        # state corresponds to a fragment-binary excitataion.
+        self.bin_excite = False 
         keys = set(('e_states', 'fciboxes', 'nroots', 'weights', 'ncas_sub', 'nelecas_sub',
                     'conv_tol_grad', 'conv_tol_self', 'max_cycle_macro', 'max_cycle_micro',
                     'ah_level_shift', 'states_converged', 'chkfile', 'e_lexc'))
@@ -1071,12 +1077,14 @@ class LASCINoSymm (casci.CASCI):
         if ci is None:
             return [np.zeros ((self.nroots,2,ncas,ncas)) for ncas in ncas_sub] 
         casdm1s = []
+        # print("len(fcibox) = ", len(self.fciboxes), "len ci = ", len(ci), "ncas_sub = ", ncas_sub, "nelecas_sub = ", nelecas_sub)
         for fcibox, ci_i, ncas, nelecas in zip (self.fciboxes, ci, ncas_sub, nelecas_sub):
             if ci_i is None:
                 dm1a = dm1b = np.zeros ((ncas, ncas))
             else:
                 dm1a, dm1b = fcibox.states_make_rdm1s (ci_i, ncas, nelecas)
             casdm1s.append (np.stack ([dm1a, dm1b], axis=1))
+        
         return casdm1s
 
     def make_casdm1s_sub (self, ci=None, ncas_sub=None, nelecas_sub=None,

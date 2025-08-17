@@ -141,3 +141,52 @@ print ("with eigenspectrum:")
 print (linalg.eigh (heff_null)[0])
 
 
+mc2 = mcscf.CASCI (mf, 4, 4)
+mc2.mo_coeff = las.mo_coeff
+
+mc2.kernel()
+ci_vec = mc2.ci
+print("mc2 ci elements with abs > 1e-2:")
+for idx, val in np.ndenumerate(ci_vec):
+    if abs(val) > 1e-2:
+        print(f"Index {idx}: {val:.6f}")
+print("mc2 e_tot = ", mc2.e_tot)
+
+ci1_vec = mc.ci
+# print("mc ci = \n ", ci1_vec)
+print("mc ci elements with abs > 1e-2:")
+for idx, val in np.ndenumerate(ci1_vec):
+    if abs(val) > 1e-2:
+        print(f"Index {idx}: {val:.6f}")
+print("mc e_tot = ", mc.e_tot)
+
+psi_final = mc.fcisolver.psi
+ci_f_final = psi_final.ci_f # list of optimized CI vectors for each fragment
+ci_h_final = [fockspace.fock2hilbert (c, 2, (1,1)) for c in ci_f_final]
+print("hilbert mc ci = \n", ci_h_final)
+
+
+from pyscf.fci import cistring
+str = cistring.make_strings((0,1,2,3), 2)
+
+print("CIStrings for 4 electrons in 4 orbitals: ", str)
+
+def fock_ci_to_cas_ci(norbcas, neleacas, nelebcas uscc_ci):
+    ''' Convert Fock space CI to CASCI, FOCK CI is the tensor product of
+    fragment CIs, of size 2^norb x 2^norb. Many elemnts of FOCK CI
+    are 0 and corresponds to invalid determinants. CASCI is a 
+    c(norb,nelec) x c(norb,nelec) matrix. '''
+    comb_str_a = cistring.make_strings(range(norbcas), neleacas)
+    comb_str_b = cistring.make_strings(range(norbcas), nelebcas)
+    cas_ci = np.zeros((len(comb_str_a), len(comb_str_b)), dtype=uscc_ci.dtype)
+    for i, bra in enumerate(comb_str_a):
+        for j, ket in enumerate(comb_str_b):
+            cas_ci[i,j] = uscc_ci[bra, ket]
+    return cas_ci
+
+converted_cas_ci = fock_ci_to_cas_ci(4, 2, ci1_vec)
+print("Converted CASCI CI matrix:\n", converted_cas_ci)
+
+diff = converted_cas_ci - ci_vec
+print("Difference between converted_cas_ci and ci_vec:\n", diff)
+print("Norm of the difference:", np.linalg.norm(diff))

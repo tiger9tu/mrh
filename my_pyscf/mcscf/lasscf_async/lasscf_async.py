@@ -329,5 +329,7 @@ if __name__=='__main__':
                        spins=[[0,0],[2,0],[-2,0],[0,2],[0,-2]],
                        smults=[[1,1],[3,1],[3,1],[1,3],[1,3]])
     las.kernel (mo)
+    print("las ci = \n", las.ci)
+
 
 
