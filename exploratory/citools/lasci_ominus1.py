@@ -70,7 +70,7 @@ def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0 = None, ci0_f=None,
         param_x = psi.x[:psi.nconstr + psi.uop.ngen_uniq]
     
 
-    print("before optimization, energy = ", psi.energy_tot(param_x, h))
+    # print("before optimization, energy = ", psi.energy_tot(param_x, h))
     res = optimize.minimize (psi.e_de, param_x, args=(h,), method='BFGS',
         jac=True, callback=psi_callback, options=psi_options)
 
