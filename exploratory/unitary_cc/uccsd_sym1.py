@@ -346,6 +346,7 @@ if __name__ == '__main__':
     x_rand = (1 - 2*np.random.rand (uop_sd.ngen_uniq)) * math.pi/4
     uop_sd.set_uniq_amps_(x_rand)
     upsi = uop_sd (psi)
+    print("upsi.shape =", upsi.shape)
     upsi_h = fockspace.fock2hilbert (upsi, norb, nelec)
     uTupsi = uop_sd (upsi, transpose=True)
     for ix in range (2**(2*norb)):
