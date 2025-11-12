@@ -61,6 +61,47 @@ def _op1u_(norb, aidx, iidx, amp, psi, transpose=False, deriv=0):
         ctypes.c_uint (ni))
     return psi
 
+def _op1ul_(norb, aidx, iidx, amp, psi, transpose=False, deriv=0):
+    ''' Evaluates U|Psi> = e^(amp * [a0'a1'...i1'i0' - h.c.])|Psi>
+
+        Args:
+            norb : integer
+                number of orbitals in the fock space
+            aidx : list of len (na)
+                lists +cr,-an operators
+            iidx : list of len (ni)
+                lists +an,-cr operators
+            amp : float
+                amplitude for generator
+            psi : ndarray of len (2**norb)
+                spinless fock-space CI array; modified in-place
+
+        Kwargs:
+            transpose : logical
+                Setting to True multiplies the amp by -1
+            deriv: int
+                Order of differentiation wrt the amp
+
+        Returns:
+            psi : ndarray of len (2**norb)
+                arg "psi" after operation
+    '''
+    aidx = np.ascontiguousarray (aidx, dtype=np.uint8)
+    iidx = np.ascontiguousarray (iidx, dtype=np.uint8)
+    psi = np.ascontiguousarray (psi, dtype=np.float64)
+    sgn = 1 - (2*int (transpose))
+    my_amp = sgn * (amp + (deriv * math.pi / 2))
+    na, ni = aidx.size, iidx.size
+    aidx_ptr = aidx.ctypes.data_as (ctypes.c_void_p)
+    iidx_ptr = iidx.ctypes.data_as (ctypes.c_void_p)
+    psi_ptr = psi.ctypes.data_as (ctypes.c_void_p)
+    libfsucc.FSUCCcontract1ul (aidx_ptr, iidx_ptr,
+        ctypes.c_double (my_amp), psi_ptr,
+        ctypes.c_uint (norb),
+        ctypes.c_uint (na),
+        ctypes.c_uint (ni))
+    return psi
+
 def _op1h_spinsym (norb, herm, psi):
     ''' Evaluate H|Psi>, where H is a general spin-symmetric Hermitian
         operator. I'm too lazy to put this function in its own file.
@@ -165,6 +206,7 @@ class FSUCCOperator (object):
         assert (len (self.i_idxs) == ngen)
         self.amps = np.zeros (ngen)
         self.assert_sanity (nodupes=True)
+        self.linearize = False
 
     def gen_fac (self, reverse=False, ustart=None):
         ''' Iterate over unitary factors/generators. '''
@@ -284,7 +326,10 @@ class FSUCCOperator (object):
     def __call__(self, psi, transpose=False, inplace=False):
         upsi = psi.view () if inplace else psi.copy ()
         for ix, aidx, iidx, amp in self.gen_fac (reverse=transpose):
-            _op1u_(self.norb, aidx, iidx, amp, upsi, transpose=transpose, deriv=0)
+            if self.linearize:
+                _op1ul_(self.norb, aidx, iidx, amp, upsi, transpose=transpose, deriv=0)
+            else:
+                _op1u_(self.norb, aidx, iidx, amp, upsi, transpose=transpose, deriv=0)
         return upsi
 
     def get_uniq_amps (self):
@@ -482,6 +527,7 @@ if __name__ == '__main__':
     tph_rand = np.random.rand (norb,norb)
     t2_rand = np.random.rand (norb,norb,norb,norb)
     uop_s = get_uccs_op (norb, tp=tp_rand, tph=tph_rand)
+    uop_s.linearize = True
     upsi = uop_s (psi)
     uTupsi = uop_s (upsi, transpose=True)
     for ix in range (2**norb):

@@ -117,6 +117,7 @@ class FSUCCOperator (usccsd_sym0.FSUCCOperator):
         self.uniq_gen_idx = np.array ([x[0] for x in self.symtab_uscc])
         self.amps = np.zeros (self.ngen)
         self.assert_sanity ()
+        self.linearize = False
 
     def assert_sanity (self):
         norb = self.norb // 2

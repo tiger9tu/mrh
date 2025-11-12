@@ -35,6 +35,20 @@
 typedef void (*FSUCCmixer) (int, double*, double*, double*, uint64_t, uint64_t);
 
 
+void FSUCCmixdetul (int sgn, double * amp, double * psi, double * upsi,
+    uint64_t det_ia, uint64_t det_ai)
+{
+    /* Linearized Unitary determinant mixer */
+    double psi_ia = psi[det_ia];
+    double psi_ai = psi[det_ai];
+    double tamp = *amp;
+    // Normalize the amplitude to preserve norm
+    double tampn = tamp / sqrt (tamp*tamp + 1.0);
+    double In = 1.0 / sqrt (tamp*tamp + 1.0);
+    upsi[det_ia] = In * psi_ia - tampn * psi_ai;
+    upsi[det_ai] = In * psi_ai + tampn * psi_ia;
+}
+
 void FSUCCmixdetu (int sgn, double * amp, double * psi, double * upsi,
     uint64_t det_ia, uint64_t det_ai)
 {
@@ -155,6 +169,30 @@ void FSUCCcontract1 (uint8_t * aidx, uint8_t * iidx, double * amp,
 
 
 }
+
+
+void FSUCCcontract1ul (uint8_t * aidx, uint8_t * iidx, double tamp,
+    double * psi, unsigned int norb, unsigned int na, unsigned int ni)
+{
+    /* Evaluate O|Psi> = (I + t(a0'a1'...i1i0 - i0'i1'...a1a0)) |Psi> 
+       Pro tip: add pi/2 to the amplitude to evaluate dU/dt |Psi>
+
+       Input:
+            aidx : array of shape (na); identifies +cr,-an ops
+            iidx : array of shape (ni); identifies +an,-cr ops
+                Note: creation operators are applied left < right;
+                annihilation operators are applied right < left
+            tamp : the amplitude or angle
+
+       Input/Output:
+            psi : array of shape (2**norb); contains wfn
+                Modified in place. Make a copy in the caller
+                if you don't want to modify the input
+    */
+    FSUCCmixer mixer = &FSUCCmixdetul;
+    FSUCCcontract1 (aidx, iidx, &tamp, psi, psi, mixer, norb, na, ni);
+}
+
 
 void FSUCCcontract1u (uint8_t * aidx, uint8_t * iidx, double tamp,
     double * psi, unsigned int norb, unsigned int na, unsigned int ni)
