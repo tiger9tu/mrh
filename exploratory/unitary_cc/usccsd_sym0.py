@@ -337,7 +337,8 @@ class FSUCCOperator (object):
             # passing these three implies that there aren't too many ops
             a_sorted, i_sorted = np.sort (a), np.sort (i)
             errstr = 'undefined amplitude detected (i==a) {},{}'.format (i, a)
-            if (len (a) and len (i)): assert (not np.all (a_sorted==i_sorted)), errstr
+            # allow identity operators
+            # if (len (a) and len (i)): assert (not np.all (a_sorted==i_sorted)), errstr
             pq_sorted.append (tuple (sorted ([tuple (a_sorted), tuple (i_sorted)])))
         if nodupes:
             pq_sorted = set (pq_sorted)

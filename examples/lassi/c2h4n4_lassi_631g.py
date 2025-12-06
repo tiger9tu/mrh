@@ -6,6 +6,7 @@ from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF
 from mrh.my_pyscf import lassi
 from mrh.my_pyscf.tools import molden
 from c2h4n4_struct import structure as struct
+from mrh.exploratory.citools import grad, lasci_ominus1
 
 # Using a hand-made model space
 
@@ -15,7 +16,19 @@ mol.verbose = lib.logger.INFO
 mol.build ()
 mf = scf.RHF (mol).run ()
 
+
+las_tmp = LASSCF (mf, (3,3), ((2,1),(1,2)))
+las_tmp.kernel ()
+rdm1s  = las_tmp.make_casdm1s()
+rdm2s  = las_tmp.make_casdm2s()
+print("las rmd1s.shape =", rdm1s.shape)
+print("las rmd2s.shape =", rdm2s.shape)
+_,_,_,_ = grad.get_grad_exact (las_tmp, epsilon=0.0)
+
+
 las = LASSCF (mf, (3,3), ((2,1),(1,2)))
+
+
 las = las.state_average ([0.5,0.5],
     spins=[[1,-1],[-1,1]],
     smults=[[2,2],[2,2]],    
@@ -39,12 +52,19 @@ las2 = las.state_average ([0.5,0.5,0,0],
 las2.lasci ()
 las2.dump_spaces ()
 
+print("las2.ci= ", las2.ci)
 lsi = lassi.LASSI(las2)
+
 e_roots, si_hand = lsi.kernel()
 print ("LASSI(hand) energy =", e_roots[0])
 print ("SI vector (hand):")
 print (si_hand[:,0])
 
 
-molden.from_lassi (lsi, 'c2h4n4_lassi_631g.molden', state=0)
+# g_sel, grad_all, a_idxs_selected, i_idxs_selected = grad.get_grad_exact (las, epsilon=0.001)
+# g_sel, grad_all, a_idxs_selected, i_idxs_selected = grad.get_grad_exact_rdm12 (las2, rdm1s, rdm2s, epsilon=0.001)
+# print ("Selected gradients = ", g_sel)
+
+
+# molden.from_lassi (lsi, 'c2h4n4_lassi_631g.molden', state=0)
 

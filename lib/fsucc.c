@@ -42,6 +42,8 @@ void FSUCCmixdetul (int sgn, double * amp, double * psi, double * upsi,
     double psi_ia = psi[det_ia];
     double psi_ai = psi[det_ai];
     double tamp = *amp;
+    // upsi[det_ia] = -  psi_ai;
+    // upsi[det_ai] = psi_ia;
     // Normalize the amplitude to preserve norm
     double tampn = tamp / sqrt (tamp*tamp + 1.0);
     double In = 1.0 / sqrt (tamp*tamp + 1.0);

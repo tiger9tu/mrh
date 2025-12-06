@@ -96,6 +96,7 @@ def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0 = None, ci0_f=None,
     psi.converged = res.success
     psi.finalize_()
     fci.psi = psi
+    # print the element datatype of ci1
     return e_tot, ci1
 
 
@@ -405,6 +406,10 @@ class LASUCCTrialState (object):
         c_f = self.rotate_ci0 (xci)
         c = self.dp_ci (c_f)
         uc = self.uop (c)
+        # print("c = \n", c)
+        # print("uc = \n", uc)
+        # diff_norm = linalg.norm(c - uc)
+        # print("norm(c - uc) =", diff_norm)
         huc = self.contract_h2 (h, uc)
         uhuc = self.uop (huc, transpose=True)
         return c, uc, huc, uhuc, c_f

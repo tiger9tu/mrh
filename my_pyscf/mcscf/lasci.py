@@ -1173,7 +1173,7 @@ class LASCINoSymm (casci.CASCI):
                 number of orbitals in each fragment
             nelecas_sub: sequence of integers
                 number of orbitals in each fragment in the reference rootspace 
-            casdm2fr: sequence of ndarrays of shape [nroots,] + [ncas_sub[i],]*4
+            casdm2fr: sequence of ndarrays of shape [nroots,] +   [ncas_sub[i],]*4
                 output of states_make_casdm2_sub
 
         Returns:

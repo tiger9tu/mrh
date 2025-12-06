@@ -2,6 +2,55 @@ import numpy as np
 from pyscf import lib
 from mrh.exploratory.unitary_cc import lasuccsd
 
+
+def get_grad_exact_rdm12(las, rdm1 = None, rdm2 = None, epsilon=0.0):
+    """
+    It seems that removing 3-RDM still gives reasonable gradients for selection
+    """
+    # Generate RDMs
+    las_rdm1 = las.make_casdm1s() if rdm1 is None else rdm1
+    las_rdm2 = las.make_casdm2s() if rdm2 is None else rdm2
+    # las_rdm3 = las.make_casdm3s()
+
+    # Generate OEI, TEI
+    nmo = las.mo_coeff.shape[1]
+    ncas, ncore = las.ncas, las.ncore
+    nocc = ncore + ncas
+    h2e = lib.numpy_helper.unpack_tril (las.get_h2eff().reshape (nmo*ncas,ncas*(ncas+1)//2)).reshape (nmo, ncas, ncas, ncas)[ncore:nocc,:,:,:]
+    h1las, h0las = las.h1e_for_cas(mo_coeff=las.mo_coeff)
+    h2las = h2e
+
+    # Generate indices
+    nlas = las.ncas_sub
+    uop = lasuccsd.gen_uccsd_op(ncas,nlas)
+    a_idxs = uop.a_idxs
+    i_idxs = uop.i_idxs
+
+    # Compute gradients and collect indices
+    gen_indices = []
+    
+    grad_h1t1 = get_grad_h1t1(a_idxs, i_idxs, las_rdm1, h1las)
+    grad_h2t1 = get_grad_h2t1(a_idxs, i_idxs, las_rdm2, h2las)
+    grad_h1t2 = get_grad_h1t2(a_idxs, i_idxs, las_rdm2, h1las)
+    # grad_h2t2 = get_grad_h2t2(a_idxs, i_idxs, las_rdm2, las_rdm3, h2las)
+
+    # gradients = np.concatenate((grad_h1t1+grad_h2t1, grad_h1t2+grad_h2t2))
+    gradients = np.concatenate((grad_h1t1+grad_h2t1, grad_h1t2))
+    gen_indices = list(zip(i_idxs, a_idxs))
+
+    # Select gradients
+    g_selected, gen_ind_selected, a_idxs_selected, i_idxs_selected = [], [], [], []
+    
+    for idx, grad in enumerate(gradients):
+        if epsilon == 0.0 or abs(grad) > epsilon:
+            g_selected.append((grad, idx))
+            a_idx, i_idx = a_idxs[idx], i_idxs[idx]
+            gen_ind_selected.append((a_idx, i_idx))
+            a_idxs_selected.append(a_idx)
+            i_idxs_selected.append(i_idx)
+    
+    return gradients, g_selected, a_idxs_selected, i_idxs_selected
+
 def get_grad_exact(las, epsilon=0.0):
     """
     Calculates the gradients for all parameters
