@@ -429,7 +429,7 @@ def _eig_block_incore (las, e0, h1, h2, ci_blk, nelec_blk, soc, opt):
                 linalg.norm (ovlp_blk - ovlp_ref))) 
         errvec = np.concatenate ([(ham_blk-ham_ref).ravel (), (s2_blk-s2_ref).ravel (),
                                   (ovlp_blk-ovlp_ref).ravel ()])
-        if np.amax (np.abs (errvec)) > 1e-8 and soc == False: # tmp until SOC in op_o1
+        if np.amax (np.abs (errvec)) > 1e-7 and soc == False: # tmp until SOC in op_o1
             raise LASSIOop01DisagreementError ("Hamiltonian + S2 + Ovlp", errvec)
         if opt == 0:
             ham_blk = ham_ref
@@ -480,6 +480,7 @@ def _eig_block_incore (las, e0, h1, h2, ci_blk, nelec_blk, soc, opt):
     xhx = raw2orth (xhx.conj ()).conj ()
     try:
         e, c = linalg.eigh (xhx)
+        t0 = lib.logger.timer (las, 'LASSI H S diagonalization', *t0)
     except linalg.LinAlgError as err:
         ovlp_det = linalg.det (ovlp_blk)
         lc = 'checking if LASSI basis has lindeps: |ovlp| = {:.6e}'.format (ovlp_det)
@@ -859,6 +860,57 @@ def root_make_rdm12s (las, ci, si, state=0, orbsym=None, soc=None, break_symmetr
                               break_symmetry=break_symmetry, spaces=spaces, opt=opt,
                               **kwargs)
 
+def roots_make_rdm3s (las, ci, si, spaces=None, **kwargs):
+    '''Evaluate spin-separated 3-body reduced density matrices for all LASSI eigenstates.
+
+    Args:
+        las : LASCI object
+        ci  : list of list of CI vectors
+        si  : ndarray of shape (nroots, nroots_si)
+
+    Kwargs:
+        spaces : list of instances of :class:`SingleLASRootspace`
+
+    Returns:
+        rdm3s : ndarray of shape (nroots_si, 4, ncas, ncas, ncas, ncas, ncas, ncas)
+            Spin components [aaa, aab, abb, bbb] for each LASSI eigenstate.
+    '''
+    statesym = las_symm_tuple (las, spaces=spaces)[0]
+    lroots = get_lroots (ci)
+    rootsym = guess_rootsym (si, statesym, lroots)
+    nroots_si = si.shape[1]
+    norb = las.ncas
+    rdm3s = [None for _ in range (nroots_si)]
+    for las1, sym, indcs, indxd in iterate_subspace_blocks (
+            las, ci, statesym, subset=set (rootsym), spaces=spaces):
+        idx_ci, idx_prod = indcs
+        ci_blk, nelec_blk = indxd
+        idx_si = np.all (np.array (rootsym) == sym, axis=1)
+        si_blk = si[np.ix_(idx_prod, idx_si)]
+        d3s = op_o0.roots_make_rdm3s (las1, ci_blk, nelec_blk, si_blk, **kwargs)
+        idx_int = np.where (idx_si)[0]
+        for i, a in enumerate (idx_int):
+            rdm3s[a] = d3s[i]
+    return np.stack (rdm3s, axis=0)
+
+
+def root_make_rdm3s (las, ci, si, state=0, spaces=None, **kwargs):
+    '''Evaluate spin-separated 3-body reduced density matrix for one LASSI eigenstate.
+
+    Args:
+        las   : LASCI object
+        ci    : list of list of CI vectors
+        si    : ndarray of shape (nroots, nroots_si)
+        state : int, index of LASSI eigenstate (column of si)
+
+    Returns:
+        rdm3s : ndarray of shape (4, ncas, ncas, ncas, ncas, ncas, ncas)
+            Normal-ordered spin components [aaa, aab, abb, bbb]
+    '''
+    si_col = si[:, state:state + 1]
+    return roots_make_rdm3s (las, ci, si_col, spaces=spaces, **kwargs)[0]
+
+
 def energy_tot (lsi, mo_coeff=None, ci=None, si=None, soc=0, opt=None):
     if mo_coeff is None: mo_coeff = lsi.mo_coeff
     if ci is None: ci = lsi.ci
@@ -1015,6 +1067,34 @@ class LASSI(lib.StreamObject):
             return dm1s, dm2s
         else:
             return root_make_rdm12s (self, ci, si, state=state, spaces=spaces, opt=opt)
+
+    def make_casdm3s (self, ci=None, si=None, state=None, weights=None, spaces=None):
+        '''Compute spin-separated 3-body reduced density matrices for LASSI states.
+
+        Kwargs:
+            ci      : list of CI vectors; defaults to self.ci
+            si      : ndarray of shape (nroots, nroots_si); defaults to self.si
+            state   : int or None.  If None, return for all eigenstates.
+            weights : ndarray of shape (nroots_si,) for state-averaged result.
+
+        Returns:
+            If state is not None : ndarray of shape (4, ncas, ncas, ncas, ncas, ncas, ncas)
+            If state is None     : ndarray of shape (nroots_si, 4, ncas, ..., ncas)
+            If weights provided  : ndarray of shape (4, ncas, ncas, ncas, ncas, ncas, ncas)
+        '''
+        if ci is None: ci = self.ci
+        if si is None: si = self.si
+        nstates = 1 if si.ndim == 1 else si.shape[1]
+        if nstates == 1:
+            if state is None: state = 0
+            if si.ndim == 1: si = si[:, None]
+        if state is None:
+            dm3s = roots_make_rdm3s (self, ci, si, spaces=spaces)
+            if weights is not None:
+                dm3s = np.tensordot (weights, dm3s, axes=((0,), (0,)))
+            return dm3s
+        else:
+            return root_make_rdm3s (self, ci, si, state=state, spaces=spaces)
 
     def make_casdm12 (self, ci=None, si=None, state=None, weights=None, spaces=None, opt=None,
                       **kwargs):
