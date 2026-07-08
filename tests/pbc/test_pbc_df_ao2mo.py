@@ -45,5 +45,5 @@ class KnownValues(unittest.TestCase):
         del kmf, mo_coeff_kpts, eri_ref, eri_new
 
 if __name__ == "__main__":
-    # print("Full Tests for RDM construction")
+    # print("Full Tests for Optimized version of ao2mo_7d")
     unittest.main()
