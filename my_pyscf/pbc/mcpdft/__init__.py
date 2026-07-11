@@ -44,7 +44,8 @@ def _MCPDFT (mc_class, kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
         kmf0 = _sanity_check_for_kmf(kmf0)
         kmc0 = None
 
-    kmc = get_mcpdft_child_class (mc_class (kmf0, ncas, nelecas, ncore=ncore, frozen=frozen),
+    assert frozen is None, "Frozen orbitals are not supported in k-MCPDFT yet."
+    kmc = get_mcpdft_child_class (mc_class (kmf0, ncas, nelecas, ncore=ncore),
                                    ot, **kwargs)
 
     if kmc0 is not None:
@@ -61,8 +62,8 @@ def kCASSCFPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs
     return _MCPDFT(mcscf.CASSCF, kmc_or_kmf, ot, ncas, nelecas, ncore=ncore, frozen=frozen,
                    **kwargs)
 
-def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, **kwargs):
-    return _MCPDFT(mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas, ncore=ncore,
+def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs):
+    return _MCPDFT(mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas, ncore=ncore, frozen=frozen,
                    **kwargs)
 
 CASSCF = kCASSCFPDFT
