@@ -1,17 +1,14 @@
 import numpy as np
 
-from pyscf import ao2mo, lib
-from pyscf.mcscf.addons import StateAverageMCSCFSolver
-
-from pyscf.mcpdft.otfnal import transfnal, get_transfnal
-from pyscf.mcpdft.mcpdft import _get_e_decomp
-from pyscf.mcpdft.mcpdft import _PDFT, _mcscf_env
+from pyscf.mcpdft.mcpdft import _PDFT
 from pyscf.pbc.dft import gen_grid as pbc_gen_grid
+
+from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_transfnal
+
 '''
 Author: Bhavnesh Jangid
 k-MC-PDFT for periodic systems at the gamma point or k-points.
 '''
-
 
 class _kMCPDFT(_PDFT):
     '''
@@ -19,15 +16,18 @@ class _kMCPDFT(_PDFT):
     This class is making sure, the functionalities which are not 
     compatible with periodic systems are throwing NotImplementedError. 
     '''
-
     def _init_ot_grids(self, my_ot, grids_attr=None):
+        '''
+        Initialization of on-top functional and grids for periodic systems.
+        '''
         if grids_attr is None:
             grids_attr = {}
 
         old_grids = getattr(self, 'grids', None)
 
         if isinstance(my_ot, (str, np.bytes_)):
-            self.otfnal = get_transfnal(self.mol, my_ot)
+            # Note: I have changed the input arg. for below function.
+            self.otfnal = get_pbc_transfnal(self._mc_class, my_ot)
         else:
             self.otfnal = my_ot
 
@@ -49,27 +49,6 @@ class _kMCPDFT(_PDFT):
         self.otfnal.verbose = self.verbose
         self.otfnal.stdout = self.stdout    
     
-    def get_h2eff(self, mo_coeff=None):
-        'Compute the active space two-particle Hamiltonian.'
-        ncore = self.ncore
-        ncas = self.ncas
-        nocc = ncore + ncas
-        if mo_coeff is None:
-            mo_coeff = self.mo_coeff[:, ncore:nocc]
-        elif mo_coeff.shape[1] != ncas:
-            mo_coeff = mo_coeff[:, ncore:nocc]
-
-        if getattr(self._scf, '_eri', None) is not None:
-            eri = ao2mo.full(self._scf._eri, mo_coeff,
-                             max_memory=self.max_memory)
-        elif getattr (self, 'with_df', False):
-            eri = self.with_df.ao2mo(mo_coeff)
-
-        else:
-            eri = ao2mo.full(self.mol, mo_coeff, verbose=self.verbose,
-                             max_memory=self.max_memory)
-        return eri
-
     def multi_state(self, method='Lin'):
         raise NotImplementedError(f"StateAverageMix not available for {method}")
 
@@ -80,6 +59,7 @@ def get_mcpdft_child_class(mc, ot, **kwargs):
     class PDFT(_kMCPDFT, mc.__class__):
         __doc__ = mc_doc + '\n\n' + _kMCPDFT.__doc__
         _mc_class = mc.__class__
+
         def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None, otxc=None,
                                  grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
 
