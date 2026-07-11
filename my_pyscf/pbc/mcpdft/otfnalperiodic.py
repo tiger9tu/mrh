@@ -1,13 +1,17 @@
 import numpy as np
+
 from pyscf.lib import logger, param
 from pyscf.mcpdft import _dms
 from pyscf.mcpdft.otpd import get_ontop_pair_density
 from pyscf.mcpdft.otfnal import otfnal
-from mrh.my_pyscf.mcpdft import _getmole
 from pyscf.mcpdft.otfnal import get_transfnal
 from pyscf.mcpdft.otfnal import transfnal, ftransfnal
 from pyscf import __config__
+from pyscf.pbc import gto as pbcgto
+from pyscf.mcscf import mc1step, casci
+from mrh.my_pyscf.pbc.mcscf import mc1step as pbc_mc1step, casci as pbc_casci
 
+from pyscf import gto
 from pyscf.pbc import dft
 
 def redefine_fnal(original_class, new_parent):
@@ -19,6 +23,25 @@ def redefine_fnal(original_class, new_parent):
 
 redefine_transfnal = redefine_fnal
 redefine_ftransfnal = redefine_fnal
+
+def _get_mol_or_cell(kmc_or_kmf_mol_cell):
+    '''
+    A function to get the mol object from the kmc_or_kmf_mol object
+    '''
+    if isinstance(kmc_or_kmf_mol_cell, (mc1step.CASSCF, casci.CASCI)):
+        return kmc_or_kmf_mol_cell._scf.mol
+    elif isinstance(kmc_or_kmf_mol_cell, (pbc_mc1step.CASSCF, pbc_casci.CASCI)):
+        return kmc_or_kmf_mol_cell._scf.cell
+    elif isinstance(kmc_or_kmf_mol_cell, gto.Mole) or \
+        isinstance(kmc_or_kmf_mol_cell, pbcgto.cell.Cell):
+        return kmc_or_kmf_mol_cell
+    elif getattr(kmc_or_kmf_mol_cell, 'mol', None) is not None:
+        return kmc_or_kmf_mol_cell.mol
+    elif getattr(kmc_or_kmf_mol_cell, 'cell', None) is not None:
+        return kmc_or_kmf_mol_cell.cell
+    else:
+        raise ValueError ("The input object is not recognized. " \
+        "It should be either MC-SCF/SCF or Mole/Cell object.")
 
 class otfnalperiodic(otfnal):
     '''
@@ -92,7 +115,7 @@ def _get_ks_obj(kmc_or_kmf_or_cell):
     returns:
         ks : KS object with app. density fitting object GDF, MDF or FFTDF
     '''
-    cell = _getmole (kmc_or_kmf_or_cell)
+    cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
     if hasattr(kmc_or_kmf_or_cell, 'with_df'):
         dfclass = kmc_or_kmf_or_cell.with_df.__class__.__name__
     
@@ -117,7 +140,7 @@ def get_pbc_otfnal(kmc_or_kmf_or_cell, otxc):
         kmc_or_kmf_or_cell : kMC or kMF object with cell object
         otxc : str, on-top functional name
     '''
-    cell = _getmole (kmc_or_kmf_or_cell)
+    cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
     fnal_class = get_transfnal (cell, otxc)
     fnal_class_type = fnal_class.__class__.__name__
 
