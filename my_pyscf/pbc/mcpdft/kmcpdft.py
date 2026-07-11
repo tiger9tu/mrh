@@ -6,11 +6,12 @@ from pyscf.mcscf.addons import StateAverageMCSCFSolver
 from pyscf.mcpdft.otfnal import transfnal, get_transfnal
 from pyscf.mcpdft.mcpdft import _get_e_decomp
 from pyscf.mcpdft.mcpdft import _PDFT, _mcscf_env
-
+from pyscf.pbc.dft import gen_grid as pbc_gen_grid
 '''
 Author: Bhavnesh Jangid
 k-MC-PDFT for periodic systems at the gamma point or k-points.
 '''
+
 
 class _kMCPDFT(_PDFT):
     '''
@@ -19,6 +20,35 @@ class _kMCPDFT(_PDFT):
     compatible with periodic systems are throwing NotImplementedError. 
     '''
 
+    def _init_ot_grids(self, my_ot, grids_attr=None):
+        if grids_attr is None:
+            grids_attr = {}
+
+        old_grids = getattr(self, 'grids', None)
+
+        if isinstance(my_ot, (str, np.bytes_)):
+            self.otfnal = get_transfnal(self.mol, my_ot)
+        else:
+            self.otfnal = my_ot
+
+        pbc_grid_types = (
+            pbc_gen_grid.UniformGrids,
+            pbc_gen_grid.BeckeGrids,
+        )
+
+        if isinstance(old_grids, pbc_grid_types):
+            self.otfnal.grids = old_grids
+        else:
+            self.otfnal.grids = pbc_gen_grid.BeckeGrids(self.mol)
+
+        self.otfnal.grids.__dict__.update(grids_attr)
+
+        for key, value in grids_attr.items():
+            assert getattr(self.otfnal.grids, key, None) == value
+
+        self.otfnal.verbose = self.verbose
+        self.otfnal.stdout = self.stdout    
+    
     def get_h2eff(self, mo_coeff=None):
         'Compute the active space two-particle Hamiltonian.'
         ncore = self.ncore
