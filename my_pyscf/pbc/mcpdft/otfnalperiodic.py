@@ -165,12 +165,12 @@ class otfnalperiodic_kpts(otfnal):
         
         # First construct the cumulant then transform it to block mo-orbitals basis.
         cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
-        casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
+        cascm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
         kconserv = kpts_helper.get_kconserv(cell, kpts)
         for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             k4 = kconserv[k1, k2, k3]
             dm2_k = _basis_transform_casdm2_kpts(cascm2, mo_phase, (k1, k2, k3, k4))
-            casdm2_kpts[k1, k2, k3] = dm2_k
+            cascm2_kpts[k1, k2, k3] = dm2_k
         
         # First, transform the casdm1s to dm1s for each k-point.
         dm1s_kpts = []
@@ -208,8 +208,8 @@ class otfnalperiodic_kpts(otfnal):
             rho = np.asarray ([m (0, ao_k1, mask, xctype).real for m in make_rho])
             
             t0 = logger.timer (ot, 'untransformed density', *t0)
-            Pi = get_ontop_pair_density_kpts (ot, rho, ao_k2, cascm2, mo_cas,
-                                              kconserv, deriv=dens_deriv, nontab0=mask)
+            Pi = get_ontop_pair_density_kpts (ot, rho, ao_k2, cascm2_kpts, mo_cas,
+                                              kconserv, deriv=dens_deriv, non0tab=mask)
             t0 = logger.timer (ot, 'on-top pair density calculation', *t0)
             if rho.ndim == 2:
                 rho = np.expand_dims (rho, 1)

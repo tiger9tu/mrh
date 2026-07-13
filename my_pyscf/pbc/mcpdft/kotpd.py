@@ -1,6 +1,70 @@
 import numpy as np
 from pyscf.lib import logger
-from pyscf.pbc.lib import kpts_helper
+
+from pyscf.dft.numint import _dot_ao_dm
+
+
+def _grid_ao2mo_kpts(cell, ao, mo_coeff, non0tab=None,
+                     shls_slice=None, ao_loc=None):
+    r'''
+    Transform MO values on grid, independently at each k-point.
+    ao[k, deriv, grid, AO] . mo_coeff[k, AO, MO] -> mo[k, deriv, grid, MO]
+    args:
+        cell : pyscf.pbc.gto.Cell
+            Periodic cell object.
+        ao : ndarray
+            AO values with shape
+                (nkpts, nderiv, ngrids, nao)
+        mo_coeff : ndarray
+            MO coefficients with shape
+    
+    kwargs:
+        non0tab : ndarray or None
+            Shell-screening mask for the current grid block. The same
+            non0tab is used for every k-point.
+        shls_slice : tuple or None
+            AO shell range.
+
+        ao_loc : ndarray or None
+            AO offsets for each shell.
+
+    returns:
+        mo : ndarray
+            MO values with shape
+                (nkpts, nderiv, ngrids, nmo)
+            The underlying storage is arranged so that the grid index
+            is contiguous for each derivative, MO, and k-point.
+    '''
+    ao = np.asarray(ao)
+    mo_coeff = np.asarray(mo_coeff)
+    assert ao.ndim == 4, 'ao must have shape (nkpts, nderiv, ngrids, nao)'
+    assert mo_coeff.ndim == 3, 'mo_coeff must have shape (nkpts, nao, nmo)'
+    nkpts, nderiv, ngrids, nao = ao.shape
+    nkpts_, nao_, nmo = mo_coeff.shape
+    assert nkpts == nkpts_ and nao == nao_, 'ao and mo_coeff must have compatible shapes'
+
+    if shls_slice is None: shls_slice = (0, cell.nbas)
+    if ao_loc is None: ao_loc = cell.ao_loc_nr()
+
+    dtype = np.result_type(ao.dtype, mo_coeff.dtype)
+
+    mo = np.empty((nkpts, nderiv, nmo, ngrids), 
+                  dtype=dtype, order='C',)
+    mo = mo.transpose(0, 1, 3, 2)
+
+    for k in range(nkpts):
+        for ideriv in range(nderiv):
+            mo[k, ideriv] = _dot_ao_dm(
+                cell,
+                ao[k, ideriv],
+                mo_coeff[k],
+                non0tab,
+                shls_slice,
+                ao_loc,
+                out=mo[k, ideriv],)
+    return mo
+
+
 
 def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         kconserv, deriv=0, non0tab=None):
@@ -52,7 +116,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         Pi : ndarray of shape (ngrids,)
             On-top pair density.
     '''
-    assert deriv == 0, 'Only zeroth-order on-top pair density is implemented'
+    assert deriv == 1, 'Only zeroth-order on-top pair density is implemented'
 
     rho = np.asarray(rho)
     ao = np.asarray(ao)
@@ -63,10 +127,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     # Some sanity checks:
     assert mo_cas.shape[0] == ao.shape[0] == cascm2.shape[0]
     assert rho.ndim == 3 and rho.shape[0] == 2, 'rho must have shape (2,*,ngrids)'
-    assert ao.ndim == 4 and ao.shape[1] == 1, 'ao must have shape (nkpts,*,ngrids,nao)'
-
-    dtype = np.result_type(rho.dtype, grid2amo.dtype, cascm2.dtype,)
-
+    
     nkpts = mo_cas.shape[0]
     ngrids, nao = ao.shape[-2:]
 
@@ -74,11 +135,8 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     #     phi[k,g,u] = sum_mu ao[k,g,mu] * C[k,mu,u]
     t0 = (logger.process_clock (), logger.perf_counter ())
 
-    # grid2amo = [np.einsum('ga,au->gu', ao[k, 0], mo_cas[k], optimize=True)
-    #             for k in range(nkpts)]
-    grid2amo = [np.dot(ao[k, 0], mo_cas[k]) 
-                for k in range(nkpts)]
-    grid2amo = np.stack(grid2amo, axis=0)
+    grid2amo = _grid_ao2mo_kpts(ot.cell, ao[:, 0][:, None, :, :], mo_cas,non0tab=non0tab,)[:, 0]
+    dtype = np.result_type(rho.dtype, grid2amo.dtype, cascm2.dtype,)
     Pi_shape = ((1,4,5)[deriv], rho.shape[-1])
     Pi = np.zeros(Pi_shape, dtype=dtype)
 
@@ -113,11 +171,11 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         for k2 in range(nkpts):
             phi2H = grid2amo[k2]
             gridkern_left = (phi1H[:, :, None] * phi2H[:, None, :])
-            cm2_k = cascm2[k1, k2, k3]
-            # wrk[g,x,y] = sum_{u,v} phi[u,k1]^* * phi[v,k2] * Lambda[u,v,x,y]
-            wrk = np.tensordot(gridkern_left, cm2_k, axes=((1, 2), (0, 1)),)
             for k3 in range(nkpts):
                 k4 = kconserv[k1, k2, k3]
+                cm2_k = cascm2[k1, k2, k3]
+                # wrk[g,x,y] = sum_{u,v} phi[u,k1]^* * phi[v,k2] * Lambda[u,v,x,y]
+                wrk = np.tensordot(gridkern_left, cm2_k, axes=((1, 2), (0, 1)),)
                 phi3 = grid2amo[k3].conj()
                 phi4 = grid2amo[k4]
                 gridkern_right = (phi3[:, :, None] * phi4[:, None, :])
@@ -127,5 +185,5 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     # Don't forget to normalize it by number of k-points.
     Pi += Pi_connected / (2.0 * nkpts**2)
     t0 = logger.timer_debug1 (ot, 'otpd takes: ', *t0)
-    return Pi
+    return Pi.real
 

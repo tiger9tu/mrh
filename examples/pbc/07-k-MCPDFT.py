@@ -32,7 +32,7 @@ cell.verbose = lib.logger.INFO
 cell.build()
 
 
-kmesh2D = [1, 1, 1] 
+kmesh2D = [2, 1, 1] 
 kpts = cell.make_kpts(kmesh2D, wrap_around=True)
 
 kmf = scf.KRHF(cell, kpts=kpts).density_fit(auxbasis='def2-svp-jkfit')
@@ -43,7 +43,7 @@ kmf.kernel()
 from mrh.my_pyscf.pbc.fci import csf_solver
 from mrh.my_pyscf.pbc import mcpdft
 
-kmc = mcpdft.CASCI(kmf, 'tPBE', 2, 2)
+kmc = mcpdft.KCASCI(kmf, 'tPBE', 2, 2)
 kmc.kpts = kpts
 kmc.kmesh = kmesh2D
 kmc.fcisolver = csf_solver(cell, smult=1)
