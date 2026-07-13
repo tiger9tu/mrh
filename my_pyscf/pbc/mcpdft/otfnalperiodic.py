@@ -106,6 +106,7 @@ class otfnalperiodic(otfnal):
         # A hack to reset the grids for the new cell object.
         self.grids.reset (mol) 
 
+otfnalperiodic_gamma = otfnalperiodic
 
 def _get_ks_obj(kmc_or_kmf_or_cell):
     '''
@@ -153,15 +154,15 @@ def get_pbc_otfnal(kmc_or_kmf_or_cell, otxc):
         xc_base = xc_base[1:]
         ks.xc = xc_base
         org_transfnal = transfnal(ks)
-        new_func_class = redefine_transfnal (org_transfnal, otfnalperiodic)
+        new_func_class = redefine_transfnal (org_transfnal, otfnalperiodic_gamma)
         del org_transfnal
 
     elif fnal_class_type == 'ftransfnal':
         xc_base = xc_base[2:]
         ks.xc = xc_base
         org_ftransfnal = ftransfnal(ks)
-        new_func_class = redefine_ftransfnal (org_ftransfnal, otfnalperiodic)
-        del org_transfnal
+        new_func_class = redefine_ftransfnal (org_ftransfnal, otfnalperiodic_gamma)
+        del org_ftransfnal
     else:
         raise ValueError ("The fnal class is not recognized")
 
