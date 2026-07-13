@@ -88,23 +88,39 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     # Time for the connected parts:
     Pi_connected = np.zeros(ngrids, dtype=dtype,)
 
-    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        k4 = kconserv[k1, k2, k3]
-        # phi1[g,x] * phi2[g,y] : result shape (ngrids, ncas, ncas)
+    # for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+    #     k4 = kconserv[k1, k2, k3]
+    #     # phi1[g,x] * phi2[g,y] : result shape (ngrids, ncas, ncas)
+    #     phi1H = grid2amo[k1].conj()
+    #     phi2H = grid2amo[k2]
+    #     gridkern_left = (phi1H[:, :, None] * phi2H[:, None, :])
+    #     # phi13g,x] * phi4[g,y] : result shape (ngrids, ncas, ncas)
+    #     phi3 = grid2amo[k3].conj()
+    #     phi4 = grid2amo[k4]
+    #     gridkern_right = (phi3[:, :, None] * phi4[:, None, :])
+    #     cm2_k = cascm2[k1, k2, k3]
+
+    #     # wrk[g,x,y] = sum_{u,v} phi[u,k1]^* * phi[v,k2] * Lambda[u,v,x,y]
+    #     wrk = np.tensordot(gridkern_left, cm2_k, axes=((1, 2), (0, 1)),)
+
+    #     #     = sum_{x,y} wrk[g,x,y] * phi[x,k3]^* * phi[y,k4]
+    #     Pi_connected += (gridkern_right * wrk).sum(axis=(1, 2))
+
+    for k1 in range(nkpts):
         phi1H = grid2amo[k1].conj()
-        phi2H = grid2amo[k2]
-        gridkern_left = (phi1H[:, :, None] * phi2H[:, None, :])
-        # phi13g,x] * phi4[g,y] : result shape (ngrids, ncas, ncas)
-        phi3 = grid2amo[k3].conj()
-        phi4 = grid2amo[k4]
-        gridkern_right = (phi3[:, :, None] * phi4[:, None, :])
-        cm2_k = cascm2[k1, k2, k3]
-
-        # wrk[g,x,y] = sum_{u,v} phi[u,k1]^* * phi[v,k2] * Lambda[u,v,x,y]
-        wrk = np.tensordot(gridkern_left, cm2_k, axes=((1, 2), (0, 1)),)
-
-        #     = sum_{x,y} wrk[g,x,y] * phi[x,k3]^* * phi[y,k4]
-        Pi_connected += (gridkern_right * wrk).sum(axis=(1, 2))
+        for k2 in range(nkpts):
+            phi2H = grid2amo[k2]
+            gridkern_left = (phi1H[:, :, None] * phi2H[:, None, :])
+            cm2_k = cascm2[k1, k2, k3]
+            # wrk[g,x,y] = sum_{u,v} phi[u,k1]^* * phi[v,k2] * Lambda[u,v,x,y]
+            wrk = np.tensordot(gridkern_left, cm2_k, axes=((1, 2), (0, 1)),)
+            for k3 in range(nkpts):
+                k4 = kconserv[k1, k2, k3]
+                phi3 = grid2amo[k3].conj()
+                phi4 = grid2amo[k4]
+                gridkern_right = (phi3[:, :, None] * phi4[:, None, :])
+                #     = sum_{x,y} wrk[g,x,y] * phi[x,k3]^* * phi[y,k4]
+                Pi_connected += (gridkern_right * wrk).sum(axis=(1, 2))
 
     # Don't forget to normalize it by number of k-points.
     Pi += Pi_connected / (2.0 * nkpts**2)
