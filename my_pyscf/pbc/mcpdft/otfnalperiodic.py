@@ -1,4 +1,6 @@
+
 import numpy as np
+from functools import reduce
 
 from pyscf.lib import logger, param
 from pyscf.mcpdft import _dms
@@ -9,8 +11,11 @@ from pyscf.mcpdft.otfnal import transfnal, ftransfnal
 from pyscf import __config__
 from pyscf.pbc import gto as pbcgto
 from pyscf.mcscf import mc1step, casci
-from mrh.my_pyscf.pbc.mcscf import mc1step as pbc_mc1step, casci as pbc_casci
+from pyscf.pbc.lib import kpts_helper
 
+from mrh.my_pyscf.pbc.mcscf import mc1step as pbc_mc1step, casci as pbc_casci
+from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R
+from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts as _basis_transform_casdm2_kpts
 from pyscf import gto
 from pyscf.pbc import dft
 
@@ -107,6 +112,95 @@ class otfnalperiodic(otfnal):
         self.grids.reset (mol) 
 
 otfnalperiodic_gamma = otfnalperiodic
+
+class otfnalperiodic_kpts(otfnal):
+    '''
+    Child class to define the otfnal class for periodic systems for k-points.
+    '''
+
+    def energy_ot (ot, casdm1s, casdm2, mo_coeff, ncore, max_memory=param.MAX_MEMORY, hermi=1):
+        '''
+        See the docstring of pyscf/mcpdft/otfnal.energy_ot for more information.
+        '''
+
+        E_ot = 0.0
+        ni = ot._numint
+        xctype =  ot.xctype
+        dtype = mo_coeff.dtype
+
+        if xctype=='HF': 
+            return E_ot
+        
+        assert mo_coeff.ndim == 3, "The mo_coeff should be 3D array for k-points calculations"
+        
+        dens_deriv = ot.dens_deriv
+
+        nao = mo_coeff[0].shape[0]
+        ncastot = casdm2.shape[0]
+        ncas = ot.ncas
+        nkpts = ncastot // ncas
+        
+        # Need to check this.
+        cell = ot.cell
+        kpts = ot.kpts
+
+        assert nkpts == mo_coeff.shape[0], "The number of k-points in mo_coeff and casdm2 should be same"
+        assert getattr(ot, 'kmesh', None) is not None, "The kmesh attribute should be set in the otfnal object"
+
+        mo_phase = get_mo_coeff_k2R(ot._scf, mo_coeff, ncore, ncas, kmesh=ot.kmesh)[-1]
+        
+        assert casdm2.shape == (ncastot,)*4
+        assert casdm1s.shape == (ncastot, ncastot)
+        
+        # First construct the cumulant then transform it to block mo-orbitals basis.
+        cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
+        casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
+        kconserv = kpts_helper.get_kconserv(cell, kpts)
+        for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+            k4 = kconserv[k1, k2, k3]
+            dm2_k = _basis_transform_casdm2_kpts(cascm2, mo_phase, (k1, k2, k3, k4))
+            casdm2_kpts[k1, k2, k3] = dm2_k
+        
+        # First, transform the casdm1s to dm1s for each k-point.
+        dm1s_kpts = []
+        for k in range(nkpts):
+            casdm1s_k = [reduce(np.dot, (mo_phase[k], casdm1s_, mo_phase[k].conj().T)) 
+                        for casdm1s_ in casdm1s]
+            dm1s =_dms.casdm1s_to_dm1s (ot, casdm1s_k, mo_coeff=mo_coeff[k], ncore=ncore, 
+                                         ncas=ncas)
+            dm1s_kpts.append(dm1s)
+        
+        dm1s_kpts = np.array(dm1s_kpts)
+
+        mo_cas = np.array([mo_coeff[k][:,ncore:][:,:ncas] 
+                           for k in range(nkpts)])
+        
+        t0 = (logger.process_clock (), logger.perf_counter ())
+        make_rho = tuple (ni._gen_rho_evaluator (ot.mol, dm1s[i,:,:], hermi) for
+            i in range(2))
+        
+        for ao_k1, ao_k2, mask, weight, _ \
+            in ni.block_loop(ot.mol, ot.grids, nao, deriv=dens_deriv, kpt=None, max_memory=max_memory):
+            '''
+            ao_k1 and ao_k2 are the block of AO integrals for the given k-point. They
+            are the same for supercell(1x1x1) calculations.
+            '''
+            rho = np.asarray ([m[0] (0, ao_k1, mask, xctype) for m in make_rho])
+            t0 = logger.timer (ot, 'untransformed density', *t0)
+            Pi = get_ontop_pair_density (ot, rho, ao_k1, cascm2, mo_cas,
+                dens_deriv, mask)
+            t0 = logger.timer (ot, 'on-top pair density calculation', *t0)
+            if rho.ndim == 2:
+                rho = np.expand_dims (rho, 1)
+                Pi = np.expand_dims (Pi, 0)
+            E_ot += ot.eval_ot (rho, Pi, dderiv=0, weights=weight)[0].dot (weight)
+            t0 = logger.timer (ot, 'on-top energy calculation', *t0)
+
+        return E_ot
+    
+    energy_ot.__doc__ = otfnal.energy_ot.__doc__
+
+
 
 def _get_ks_obj(kmc_or_kmf_or_cell):
     '''
