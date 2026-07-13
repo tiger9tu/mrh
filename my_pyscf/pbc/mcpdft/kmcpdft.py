@@ -1,15 +1,129 @@
 import numpy as np
+from functools import reduce
 
+from pyscf.lib import logger
 from pyscf.mcpdft.mcpdft import _PDFT
+from pyscf.mcpdft import _dms
 from pyscf.pbc.dft import gen_grid as pbc_gen_grid
 from pyscf.mcpdft._dms import _get_fcisolver
 
 from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_otfnal_kpts
+from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
 
 '''
 Author: Bhavnesh Jangid
 k-MC-PDFT for periodic systems at the gamma point or k-points.
 '''
+
+# Need to redefine the casdm1s and casdm2 because of shape mismatch.
+def make_one_casdm1s (mc, ci, state=0):
+    nkpts = mc.nkpts
+    ncastot = mc.ncas *  nkpts
+    fcisolver, ci, nelecas = _get_fcisolver (mc, ci, state=state)
+    nelecastot = (nelecas[0]*nkpts, nelecas[1]*nkpts)
+    return fcisolver.make_rdm1s (ci, ncastot, nelecastot)
+
+def make_one_casdm2 (mc, ci, state=0):
+    ncas = mc.ncas
+    fcisolver, ci, nelecas = _get_fcisolver (mc, ci, state=state)
+    ncastot = ncas * mc.nkpts
+    nelecastot = (nelecas[0]*mc.nkpts, nelecas[1]*mc.nkpts)
+    try:
+        casdm2 = fcisolver.make_rdm2 (ci, ncastot, nelecastot)
+    except AttributeError:
+        _, casdm2 = fcisolver.make_rdm12 (ci, ncastot, nelecastot)
+    return casdm2
+
+def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
+                casdm2=None, verbose=None):
+    # See pyscf.mcpdft.mcpdft.energy_mcwfn for details.
+
+    if ot is None: ot = mc.otfnal
+    if mo_coeff is None: mo_coeff = mc.mo_coeff
+    if ci is None: ci = mc.ci
+    if verbose is None: verbose = mc.verbose
+    if casdm1s is None: casdm1s = mc.make_one_casdm1s(ci=ci, state=state)
+    if casdm2 is None: casdm2 = mc.make_one_casdm2(ci=ci, state=state)
+    
+    cell = mc._scf.cell
+    nkpts = mc.nkpts
+    ncore = mc.ncore
+    ncas = mc.ncas
+    kmesh = mc.kmesh
+
+    # Get the MO_PHASE:
+    mo_phase = get_mo_coeff_k2R(mc._scf, mo_coeff, ncore, ncas, kmesh=kmesh)[-1]
+    log = logger.new_logger(mc, verbose=verbose)
+    # First, transform the casdm1s to dm1s for each k-point.
+    dm1s_kpts = []
+    for k in range(nkpts):
+        casdm1s_k = [reduce(np.dot, (mo_phase[k], casdm1s_, mo_phase[k].conj().T)) 
+                    for casdm1s_ in casdm1s]
+        dm1s =_dms.casdm1s_to_dm1s (ot, casdm1s_k, mo_coeff=mo_coeff[k], ncore=ncore, 
+                                        ncas=ncas)
+        dm1s_kpts.append(dm1s)
+    
+    # Making sure the tagging the dm1s doesn't create the weird problems
+    # for pbc.
+    dm1s_kpts = np.stack([np.asarray(dm1s) for dm1s in dm1s_kpts], axis=1,)
+    
+    # Now compute the cascm2:
+    cascm2 = _dms.dm2_cumulant(casdm2, casdm1s)
+
+    hyb_x, hyb_c = ot._numint.rsh_and_hybrid_coeff(ot.otxc, mc.mol.spin)[2]
+
+    Vnn = mc.energy_nuc()
+    h1e_kpts = mc.get_hcore()
+    
+    assert h1e_kpts.ndim == 3 and dm1s_kpts.ndim == 4 and \
+        h1e_kpts.shape == dm1s_kpts[0].shape == dm1s_kpts[1].shape, \
+            'h1e_kpts and dm1s_kpts must have shape (nkpts,nao,nao)'
+
+    dm1_kpts = np.array([dm1s_kpts[0][i] + dm1s_kpts[1][i] 
+                         for i in range(nkpts)])
+    if log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10:
+        vj_kpts, vk_kpts = mc._scf.get_jk(cell, dm_kpts=dm1s_kpts)
+        vj_kpts = vj_kpts[0] + vj_kpts[1] # (nkpts, nao, nao)
+    else:
+        vj_kpts = mc._scf.get_j(cell, dm_kpts=dm1_kpts)
+
+    Te_Vne = 1./nkpts * np.einsum('kij,kji->', dm1_kpts, h1e_kpts)
+    E_j = 1./nkpts * np.einsum('kij,kji->', dm1_kpts, vj_kpts) * 0.5
+
+    log.debug('CAS energy decomposition:')
+    log.debug('Vnn = %s', Vnn)
+    log.debug('Te + Vne = %s', Te_Vne)
+    log.debug('E_j = %s', E_j)
+
+    # Keeping this warning as it is.
+    if abs(hyb_x - hyb_c) > 1e-10:
+        log.warn("exchange and correlation hybridization differ")
+        log.warn("may lead to unphysical results, see https://github.com/pyscf/pyscf-forge/issues/128")
+
+    # Note: this is not the true exchange energy, but just the HF-like exchange
+    E_x = 0.0
+    if log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10:
+        # (vk_a * dm_a) + (vk_b * dm_b)
+        E_x = -1/nkpts * (np.einsum('kij,kji->', vk_kpts[0], dm1s_kpts[0]) +
+                         np.einsum('kij,kji->', vk_kpts[1], dm1s_kpts[1]))
+        E_x /= 2.0
+        log.debug("E_x = %s", E_x)
+        log.debug("Adding (%s) * E_x = %s", hyb_x, hyb_x * E_x)
+
+    # This is not correlation, but the 2-body cumulant tensored with the eri's:
+    # g_pqrs * l_pqrs / 2
+    E_c = 0.0
+    if log.verbose >= logger.DEBUG or abs(hyb_c) > 1e-10:
+        aeri = mc.get_h2eff(mo_coeff = mo_coeff)
+        ncastot = mc.ncas * mc.nkpts
+        assert aeri.ndim == 4 and aeri.shape == (ncastot,)*4
+        E_c = np.tensordot(aeri, cascm2, axes=4) / 2*nkpts**2
+        log.debug("E_c = %s", E_c)
+        log.debug("Adding (%s) * E_c = %s", hyb_c, hyb_c * E_c)
+
+    e_mcwfn = Vnn + Te_Vne + E_j + (hyb_x * E_x) + (hyb_c * E_c)
+    return e_mcwfn
+
 
 class _kMCPDFT(_PDFT):
     '''
@@ -54,25 +168,9 @@ class _kMCPDFT(_PDFT):
     def multi_state(self, method='Lin'):
         raise NotImplementedError(f"StateAverageMix not available for {method}")
 
-
-    # Need to redefine the casdm1s and casdm2 because of shape mismatch.
-    def make_one_casdm1s (self, ci, state=0):
-        nkpts = self.nkpts
-        ncastot = self.ncas *  nkpts
-        fcisolver, ci, nelecas = _get_fcisolver (self, ci, state=state)
-        nelecastot = (nelecas[0]*nkpts, nelecas[1]*nkpts)
-        return fcisolver.make_rdm1s (ci, ncastot, nelecastot)
-
-    def make_one_casdm2 (self, ci, state=0):
-        ncas = self.ncas
-        fcisolver, ci, nelecas = _get_fcisolver (self, ci, state=state)
-        ncastot = ncas * self.nkpts
-        nelecastot = (nelecas[0]*self.nkpts, nelecas[1]*self.nkpts)
-        try:
-            casdm2 = fcisolver.make_rdm2 (ci, ncastot, nelecastot)
-        except AttributeError:
-            _, casdm2 = fcisolver.make_rdm12 (ci, ncastot, nelecastot)
-        return casdm2
+    make_one_casdm1s = make_one_casdm1s
+    make_one_casdm2 = make_one_casdm2
+    energy_mcwfn = energy_mcwfn
 
 
 def get_mcpdft_child_class(kmc, ot, **kwargs):
@@ -84,7 +182,7 @@ def get_mcpdft_child_class(kmc, ot, **kwargs):
 
         # MC-PDFT object requires mol object in ot.reset functions
         _mc_class.mol = kmc._scf.cell.to_mol()
-
+        
         def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None, otxc=None,
                                  grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
 
