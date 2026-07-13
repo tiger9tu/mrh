@@ -4,22 +4,23 @@ import numpy as np
 from functools import reduce
 
 from pyscf import gto, lib
-from pyscf.pbc import dft
 from pyscf.lib import logger, param
 from pyscf.mcpdft import _dms
 from pyscf.mcpdft.otpd import get_ontop_pair_density
 from pyscf.mcpdft.otfnal import otfnal
-from pyscf.mcpdft.otfnal import get_transfnal
-from pyscf.mcpdft.otfnal import transfnal, ftransfnal
+from pyscf.mcpdft.otfnal import get_transfnal, transfnal, ftransfnal
 from pyscf import __config__
-from pyscf.pbc import gto as pbcgto
+from pyscf.pbc import gto as pbcgto, dft
 from pyscf.mcscf import mc1step, casci
 from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.pbc.mcscf import mc1step as pbc_mc1step, casci as pbc_casci
-from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R, get_mo_coeff_k2R_wokmf
+from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R_wokmf
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts as _basis_transform_casdm2_kpts
 from mrh.my_pyscf.pbc.mcpdft.kotpd import get_ontop_pair_density_kpts
+
+
+# Author: Bhavnesh Jangid
 
 def redefine_fnal(original_fnal, new_parent, **kwargs):
     class transfnal(original_fnal.__class__, new_parent):
@@ -54,12 +55,13 @@ def _get_mol_or_cell(kmc_or_kmf_mol_cell):
         raise ValueError ("The input object is not recognized. " \
         "It should be either MC-SCF/SCF or Mole/Cell object.")
 
+
 class otfnalperiodic_gamma(otfnal):
     '''
-    Child class to define the otfnal class for periodic systems (Only for 1x1x1 kpts)
+    Child class to define the otfnal class for periodic systems. Only at the Gamma point.
     '''
-
-    def energy_ot (ot, casdm1s, casdm2, mo_coeff, ncore, max_memory=param.MAX_MEMORY, hermi=1):
+    def energy_ot (ot, casdm1s, casdm2, mo_coeff, ncore, 
+                   max_memory=param.MAX_MEMORY, hermi=1):
         '''
         See the docstring of pyscf/mcpdft/otfnal.energy_ot for more information.
         '''
@@ -85,12 +87,12 @@ class otfnalperiodic_gamma(otfnal):
             i in range(2))
         
         for ao_k1, ao_k2, mask, weight, _ \
-            in ni.block_loop(ot.mol, ot.grids, nao, deriv=dens_deriv, kpt=None, max_memory=max_memory):
+            in ni.block_loop(ot.mol, ot.grids, nao, deriv=dens_deriv, 
+                             kpt=None, max_memory=max_memory):
             '''
             ao_k1 and ao_k2 are the block of AO integrals for the given k-point. They
             are the same for supercell(1x1x1) calculations.
             '''
-
             rho = np.asarray ([m[0] (0, ao_k1, mask, xctype) for m in make_rho])
             t0 = logger.timer (ot, 'untransformed density', *t0)
             Pi = get_ontop_pair_density (ot, rho, ao_k1, cascm2, mo_cas,
@@ -101,7 +103,6 @@ class otfnalperiodic_gamma(otfnal):
                 Pi = np.expand_dims (Pi, 0)
             E_ot += ot.eval_ot (rho, Pi, dderiv=0, weights=weight)[0].dot (weight)
             t0 = logger.timer (ot, 'on-top energy calculation', *t0)
-
         return E_ot
     
     energy_ot.__doc__ = otfnal.energy_ot.__doc__
@@ -121,19 +122,11 @@ class otfnalperiodic_kpts(otfnal):
     '''
     Child class to define the otfnal class for periodic systems with k-points.
     '''
-
-    # _keys = otfnal._keys.union({'cell', 'kpts', 'kmesh'})
-
-    # def __init__(self, cell, otxc, kpts=None, kmesh=None):
-    #     super().__init__(cell, otxc)
-
-    #     self.cell = cell
-    #     self.kpts = kpts
-    #     self.kmesh = kmesh
-
     def energy_ot (ot, casdm1s, casdm2, mo_coeff, ncore, max_memory=param.MAX_MEMORY, hermi=1):
         '''
         See the docstring of pyscf/mcpdft/otfnal.energy_ot for more information.
+        # Note: the casdm1s and casdm2 are in the wannier orbital basis. We need to transform
+        them to the block mo-orbital basis for k-points calculations.
         '''
 
         E_ot = 0.0
@@ -158,7 +151,8 @@ class otfnalperiodic_kpts(otfnal):
         assert nkpts == mo_coeff.shape[0], "The number of k-points in mo_coeff and casdm2 should be same"
         assert getattr(ot, 'kmesh', None) is not None, "The kmesh attribute should be set in the otfnal object"
 
-        mo_phase = get_mo_coeff_k2R_wokmf(cell, mo_coeff, ncore, ncas, kpts, kmesh=ot.kmesh)[-1]
+        mo_phase = get_mo_coeff_k2R_wokmf(cell, mo_coeff, ncore, ncas, 
+                                          kpts, kmesh=ot.kmesh)[-1]
         
         assert casdm2.shape == (ncastot,)*4
         assert casdm1s[0].shape == casdm1s[1].shape == (ncastot, ncastot)
@@ -239,24 +233,15 @@ def _get_ks_obj(kmc_or_kmf_or_cell, khf=False, kpts=None):
         raise ValueError ("The input object does not have with_df attribute. \
                           Start with Mean-field object")
     
-    if khf:
-        assert kpts is not None
+    df_method = 'density_fit' if dfclass == 'GDF' \
+        else 'mix_density_fit' if dfclass == 'MDF' else None
+    if df_method is None:
+        raise NotImplementedError("PBD-MCPDFT is yet not implemented for FFTDF")
+    
+    ks_class = dft.KRKS(cell, kpts=kpts) if khf else dft.RKS(cell)
+    ks = getattr(ks_class, df_method)()
 
-    if dfclass == 'GDF':
-        if khf:
-            ks = dft.KRKS(cell, kpts=kpts).density_fit()
-        else:
-            ks = dft.RKS(cell).density_fit()
-
-    elif dfclass == 'MDF':
-        if khf:
-            ks = dft.KRKS(cell, kpts=kpts).mix_density_fit()
-        else:
-            ks = dft.RKS(cell).mix_density_fit()
-    else:
-        raise NotImplementedError ("PBD-MCPDFT is yet not implemented for FFTDF")
     return ks
-
 
 
 def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class, cell_kptsinfo={}):
