@@ -17,14 +17,19 @@ from pyscf.mcscf import mc1step, casci
 from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.pbc.mcscf import mc1step as pbc_mc1step, casci as pbc_casci
-from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R
+from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R, get_mo_coeff_k2R_wokmf
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts as _basis_transform_casdm2_kpts
 from mrh.my_pyscf.pbc.mcpdft.kotpd import get_ontop_pair_density_kpts
 
-def redefine_fnal(original_class, new_parent):
-    class transfnal (original_class.__class__, new_parent):
+def redefine_fnal(original_fnal, new_parent, **kwargs):
+    class transfnal(original_fnal.__class__, new_parent):
         pass
-    new_fnal = lib.view (original_class, transfnal)
+    new_fnal = lib.view(original_fnal, transfnal)
+
+    # Hack to pass on the cell and the kpts info to ot object.
+    # otherwise I need to refactor the whole code to pass the cell and kpts info to ot object.
+    for key, value in kwargs.items():
+        setattr(new_fnal, key, value)
     return new_fnal
 
 redefine_transfnal = redefine_fnal
@@ -114,8 +119,17 @@ class otfnalperiodic_gamma(otfnal):
 
 class otfnalperiodic_kpts(otfnal):
     '''
-    Child class to define the otfnal class for periodic systems for k-points.
+    Child class to define the otfnal class for periodic systems with k-points.
     '''
+
+    # _keys = otfnal._keys.union({'cell', 'kpts', 'kmesh'})
+
+    # def __init__(self, cell, otxc, kpts=None, kmesh=None):
+    #     super().__init__(cell, otxc)
+
+    #     self.cell = cell
+    #     self.kpts = kpts
+    #     self.kmesh = kmesh
 
     def energy_ot (ot, casdm1s, casdm2, mo_coeff, ncore, max_memory=param.MAX_MEMORY, hermi=1):
         '''
@@ -126,7 +140,6 @@ class otfnalperiodic_kpts(otfnal):
         ni = ot._numint
         xctype =  ot.xctype
         dtype = mo_coeff.dtype
-
         if xctype=='HF': 
             return E_ot
         
@@ -136,20 +149,19 @@ class otfnalperiodic_kpts(otfnal):
 
         nao = mo_coeff[0].shape[0]
         ncastot = casdm2.shape[0]
-        ncas = ot.ncas
-        nkpts = ncastot // ncas
+        nkpts = mo_coeff.shape[0]
+        ncas = ncastot // nkpts
         
-        # Need to check this.
         cell = ot.cell
         kpts = ot.kpts
 
         assert nkpts == mo_coeff.shape[0], "The number of k-points in mo_coeff and casdm2 should be same"
         assert getattr(ot, 'kmesh', None) is not None, "The kmesh attribute should be set in the otfnal object"
 
-        mo_phase = get_mo_coeff_k2R(ot._scf, mo_coeff, ncore, ncas, kmesh=ot.kmesh)[-1]
+        mo_phase = get_mo_coeff_k2R_wokmf(cell, mo_coeff, ncore, ncas, kpts, kmesh=ot.kmesh)[-1]
         
         assert casdm2.shape == (ncastot,)*4
-        assert casdm1s.shape == (ncastot, ncastot)
+        assert casdm1s[0].shape == casdm1s[1].shape == (ncastot, ncastot)
         
         # First construct the cumulant then transform it to block mo-orbitals basis.
         cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
@@ -171,19 +183,21 @@ class otfnalperiodic_kpts(otfnal):
         
         # Making sure the tagging the dm1s doesn't create the weird problems
         # for pbc.
-        dm1s_kpts = np.asarray(dm1s_kpts)
+        dm1s_kpts = np.stack([np.asarray(dm1s) for dm1s in dm1s_kpts], axis=1,)
 
         mo_cas = np.array([mo_coeff[k][:,ncore:][:,:ncas] 
                            for k in range(nkpts)])
         
         t0 = (logger.process_clock (), logger.perf_counter ())
         
-        make_rho_alpha, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s[0,:,:], hermi, False)
-        make_rho_beta, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s[1,:,:], hermi, False)
+        make_rho_alpha, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s_kpts[0], hermi, False)
+        make_rho_beta, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s_kpts[1], hermi, False)
         
         assert nset == 1, "Not implemented for nset > 1"
 
         make_rho = (make_rho_alpha, make_rho_beta)
+
+        kpts = kpts.reshape(-1,3)
 
         for ao_k1, ao_k2, mask, weight, _ \
             in ni.block_loop(ot.cell, ot.grids, nao, deriv=dens_deriv, kpts=kpts, 
@@ -207,7 +221,7 @@ class otfnalperiodic_kpts(otfnal):
     
     energy_ot.__doc__ = otfnal.energy_ot.__doc__
 
-def _get_ks_obj(kmc_or_kmf_or_cell):
+def _get_ks_obj(kmc_or_kmf_or_cell, khf=False, kpts=None):
     '''
     Initialize KS object with app. density fitting object GDF, MDF or FFTDF
     args:
@@ -224,21 +238,39 @@ def _get_ks_obj(kmc_or_kmf_or_cell):
     else:
         raise ValueError ("The input object does not have with_df attribute. \
                           Start with Mean-field object")
+    
+    if khf:
+        assert kpts is not None
+
     if dfclass == 'GDF':
-        ks = dft.RKS(cell).density_fit()
+        if khf:
+            ks = dft.KRKS(cell, kpts=kpts).density_fit()
+        else:
+            ks = dft.RKS(cell).density_fit()
+
     elif dfclass == 'MDF':
-        ks = dft.RKS(cell).mix_density_fit()
+        if khf:
+            ks = dft.KRKS(cell, kpts=kpts).mix_density_fit()
+        else:
+            ks = dft.RKS(cell).mix_density_fit()
     else:
         raise NotImplementedError ("PBD-MCPDFT is yet not implemented for FFTDF")
     return ks
 
-def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class):
+
+
+def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class, cell_kptsinfo={}):
     '''
     This is wrapper function to get the appropriate fnal class 
     for the given cell object
     args:
         kmc_or_kmf_or_cell : kMC or kMF object with cell object
         otxc : str, on-top functional name
+    kwargs:
+        cell_kptsinfo : dict, optional, default: {}
+            Dictionary containing the cell and kpts info to be passed to the 
+            otfnalperiodic class. This is a hack to avoid refactoring the whole code 
+            to pass the cell and kpts only needed for the kpts calculations.
     '''
     cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
     fnal_class = get_transfnal (cell, otxc)
@@ -247,20 +279,24 @@ def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class):
     assert isinstance(otxc, str), "The otxc should be a string"
     xc_base = fnal_class.otxc
 
-    ks = _get_ks_obj(kmc_or_kmf_or_cell)
-    
+    # If k-points info is provided in the cell_kptsinfo dict, use it
+    if isinstance(cell_kptsinfo, dict) and cell_kptsinfo.get('kpts') is not None:
+        ks = _get_ks_obj(kmc_or_kmf_or_cell, khf=True, kpts=cell_kptsinfo['kpts'])
+    else:
+        ks = _get_ks_obj(kmc_or_kmf_or_cell)
+
     if fnal_class_type == 'transfnal':
         xc_base = xc_base[1:]
         ks.xc = xc_base
         org_transfnal = transfnal(ks)
-        new_func_class = redefine_transfnal (org_transfnal, otfnalperiodic_class)
+        new_func_class = redefine_transfnal (org_transfnal, otfnalperiodic_class, **cell_kptsinfo)
         del org_transfnal
 
     elif fnal_class_type == 'ftransfnal':
         xc_base = xc_base[2:]
         ks.xc = xc_base
         org_ftransfnal = ftransfnal(ks)
-        new_func_class = redefine_ftransfnal (org_ftransfnal, otfnalperiodic_class)
+        new_func_class = redefine_ftransfnal (org_ftransfnal, otfnalperiodic_class, **cell_kptsinfo)
         del org_ftransfnal
     else:
         raise ValueError ("The fnal class is not recognized")
@@ -272,4 +308,11 @@ def get_pbc_otfnal_gamma(kmc_or_kmf_or_cell, otxc):
     return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_gamma)
 
 def get_pbc_otfnal_kpts(kmc_or_kmf_or_cell, otxc):
-    return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_kpts)
+    cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
+    kpts = getattr(kmc_or_kmf_or_cell, 'kpts', None)
+    kmesh = getattr(kmc_or_kmf_or_cell, 'kmesh', None)
+    assert kpts is not None, "kpts is required for kpts-based OT-FNAL"
+    assert kmesh is not None, "kmesh is required for kpts-based OT-FNAL"
+    cell_kptsinfo = {'cell': cell, 'kpts': kpts, 'kmesh': kmesh}
+    return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_kpts, cell_kptsinfo=cell_kptsinfo)
+
