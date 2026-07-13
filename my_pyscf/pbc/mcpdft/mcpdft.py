@@ -56,6 +56,12 @@ class _MCPDFT(_PDFT):
         self.otfnal.verbose = self.verbose
         self.otfnal.stdout = self.stdout    
     
+    def nuc_grad_method(self):
+        raise NotImplementedError("Nuclear gradients are not implemented for periodic MC-PDFT yet.")
+    
+    def dip_moment(self, **kwargs):
+        raise NotImplementedError("Dipole moment is not implemented for periodic MC-PDFT yet.")
+    
 def get_mcpdft_child_class(kmc, ot, **kwargs):
     mc_doc = (kmc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
 
