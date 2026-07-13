@@ -74,9 +74,11 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     #     phi[k,g,u] = sum_mu ao[k,g,mu] * C[k,mu,u]
     t0 = (logger.process_clock (), logger.perf_counter ())
 
-    grid2amo = np.array([np.einsum('kga,kau->kgu', ao[k, 0], mo_cas[k], optimize=True)
-                for k in range(nkpts)], dtype=dtype)
-
+    # grid2amo = [np.einsum('ga,au->gu', ao[k, 0], mo_cas[k], optimize=True)
+    #             for k in range(nkpts)]
+    grid2amo = [np.dot(ao[k, 0], mo_cas[k]) 
+                for k in range(nkpts)]
+    grid2amo = np.stack(grid2amo, axis=0)
     Pi_shape = ((1,4,5)[deriv], rho.shape[-1])
     Pi = np.zeros(Pi_shape, dtype=dtype)
 

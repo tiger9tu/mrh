@@ -1,7 +1,10 @@
+# !/bin/bash
 
 import numpy as np
 from functools import reduce
 
+from pyscf import gto, lib
+from pyscf.pbc import dft
 from pyscf.lib import logger, param
 from pyscf.mcpdft import _dms
 from pyscf.mcpdft.otpd import get_ontop_pair_density
@@ -16,11 +19,9 @@ from pyscf.pbc.lib import kpts_helper
 from mrh.my_pyscf.pbc.mcscf import mc1step as pbc_mc1step, casci as pbc_casci
 from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts as _basis_transform_casdm2_kpts
-from pyscf import gto
-from pyscf.pbc import dft
+from mrh.my_pyscf.pbc.mcpdft.kotpd import get_ontop_pair_density_kpts
 
 def redefine_fnal(original_class, new_parent):
-    from pyscf import lib
     class transfnal (original_class.__class__, new_parent):
         pass
     new_fnal = lib.view (original_class, transfnal)
@@ -48,7 +49,7 @@ def _get_mol_or_cell(kmc_or_kmf_mol_cell):
         raise ValueError ("The input object is not recognized. " \
         "It should be either MC-SCF/SCF or Mole/Cell object.")
 
-class otfnalperiodic(otfnal):
+class otfnalperiodic_gamma(otfnal):
     '''
     Child class to define the otfnal class for periodic systems (Only for 1x1x1 kpts)
     '''
@@ -111,8 +112,6 @@ class otfnalperiodic(otfnal):
         # A hack to reset the grids for the new cell object.
         self.grids.reset (mol) 
 
-otfnalperiodic_gamma = otfnalperiodic
-
 class otfnalperiodic_kpts(otfnal):
     '''
     Child class to define the otfnal class for periodic systems for k-points.
@@ -170,25 +169,33 @@ class otfnalperiodic_kpts(otfnal):
                                          ncas=ncas)
             dm1s_kpts.append(dm1s)
         
-        dm1s_kpts = np.array(dm1s_kpts)
+        # Making sure the tagging the dm1s doesn't create the weird problems
+        # for pbc.
+        dm1s_kpts = np.asarray(dm1s_kpts)
 
         mo_cas = np.array([mo_coeff[k][:,ncore:][:,:ncas] 
                            for k in range(nkpts)])
         
         t0 = (logger.process_clock (), logger.perf_counter ())
-        make_rho = tuple (ni._gen_rho_evaluator (ot.mol, dm1s[i,:,:], hermi) for
-            i in range(2))
+        
+        make_rho_alpha, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s[0,:,:], hermi, False)
+        make_rho_beta, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s[1,:,:], hermi, False)
+        
+        assert nset == 1, "Not implemented for nset > 1"
+
+        make_rho = (make_rho_alpha, make_rho_beta)
         
         for ao_k1, ao_k2, mask, weight, _ \
-            in ni.block_loop(ot.mol, ot.grids, nao, deriv=dens_deriv, kpt=None, max_memory=max_memory):
+            in ni.block_loop(ot.cell, ot.grids, nao, deriv=dens_deriv, kpts=kpts, 
+                             max_memory=max_memory):
             '''
-            ao_k1 and ao_k2 are the block of AO integrals for the given k-point. They
-            are the same for supercell(1x1x1) calculations.
+            ao_k1 and ao_k2 are of the shape: (nkpts, *, ngrids, nao)
             '''
-            rho = np.asarray ([m[0] (0, ao_k1, mask, xctype) for m in make_rho])
+            rho = np.asarray ([m (0, ao_k1, mask, xctype).real for m in make_rho])
+            
             t0 = logger.timer (ot, 'untransformed density', *t0)
-            Pi = get_ontop_pair_density (ot, rho, ao_k1, cascm2, mo_cas,
-                dens_deriv, mask)
+            Pi = get_ontop_pair_density_kpts (ot, rho, ao_k2, cascm2, mo_cas,
+                                              kconserv, deriv=dens_deriv, nontab0=mask)
             t0 = logger.timer (ot, 'on-top pair density calculation', *t0)
             if rho.ndim == 2:
                 rho = np.expand_dims (rho, 1)
@@ -199,8 +206,6 @@ class otfnalperiodic_kpts(otfnal):
         return E_ot
     
     energy_ot.__doc__ = otfnal.energy_ot.__doc__
-
-
 
 def _get_ks_obj(kmc_or_kmf_or_cell):
     '''
