@@ -2,6 +2,7 @@ import numpy as np
 
 from pyscf.mcpdft.mcpdft import _PDFT
 from pyscf.pbc.dft import gen_grid as pbc_gen_grid
+from pyscf.mcpdft._dms import _get_fcisolver
 
 from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_otfnal_kpts
 
@@ -54,6 +55,26 @@ class _kMCPDFT(_PDFT):
         raise NotImplementedError(f"StateAverageMix not available for {method}")
 
 
+    # Need to redefine the casdm1s and casdm2 because of shape mismatch.
+    def make_one_casdm1s (self, ci, state=0):
+        nkpts = self.nkpts
+        ncastot = self.ncas *  nkpts
+        fcisolver, ci, nelecas = _get_fcisolver (self, ci, state=state)
+        nelecastot = (nelecas[0]*nkpts, nelecas[1]*nkpts)
+        return fcisolver.make_rdm1s (ci, ncastot, nelecastot)
+
+    def make_one_casdm2 (self, ci, state=0):
+        ncas = self.ncas
+        fcisolver, ci, nelecas = _get_fcisolver (self, ci, state=state)
+        ncastot = ncas * self.nkpts
+        nelecastot = (nelecas[0]*self.nkpts, nelecas[1]*self.nkpts)
+        try:
+            casdm2 = fcisolver.make_rdm2 (ci, ncastot, nelecastot)
+        except AttributeError:
+            _, casdm2 = fcisolver.make_rdm12 (ci, ncastot, nelecastot)
+        return casdm2
+
+
 def get_mcpdft_child_class(kmc, ot, **kwargs):
     mc_doc = (kmc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
 
@@ -63,7 +84,7 @@ def get_mcpdft_child_class(kmc, ot, **kwargs):
 
         # MC-PDFT object requires mol object in ot.reset functions
         _mc_class.mol = kmc._scf.cell.to_mol()
-        
+
         def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None, otxc=None,
                                  grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
 
