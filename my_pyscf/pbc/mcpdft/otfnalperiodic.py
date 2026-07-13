@@ -227,7 +227,7 @@ def _get_ks_obj(kmc_or_kmf_or_cell):
         raise NotImplementedError ("PBD-MCPDFT is yet not implemented for FFTDF")
     return ks
 
-def get_pbc_otfnal(kmc_or_kmf_or_cell, otxc):
+def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class):
     '''
     This is wrapper function to get the appropriate fnal class 
     for the given cell object
@@ -248,17 +248,23 @@ def get_pbc_otfnal(kmc_or_kmf_or_cell, otxc):
         xc_base = xc_base[1:]
         ks.xc = xc_base
         org_transfnal = transfnal(ks)
-        new_func_class = redefine_transfnal (org_transfnal, otfnalperiodic_gamma)
+        new_func_class = redefine_transfnal (org_transfnal, otfnalperiodic_class)
         del org_transfnal
 
     elif fnal_class_type == 'ftransfnal':
         xc_base = xc_base[2:]
         ks.xc = xc_base
         org_ftransfnal = ftransfnal(ks)
-        new_func_class = redefine_ftransfnal (org_ftransfnal, otfnalperiodic_gamma)
+        new_func_class = redefine_ftransfnal (org_ftransfnal, otfnalperiodic_class)
         del org_ftransfnal
     else:
         raise ValueError ("The fnal class is not recognized")
 
     logger.info(cell, 'Periodic OT-FNAL class is used')
     return new_func_class
+
+def get_pbc_otfnal(kmc_or_kmf_or_cell, otxc):
+    return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_gamma)
+
+def get_pbc_otfnal_kpts(kmc_or_kmf_or_cell, otxc):
+    return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_kpts)
