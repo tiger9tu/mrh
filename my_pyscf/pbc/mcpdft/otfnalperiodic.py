@@ -184,7 +184,7 @@ class otfnalperiodic_kpts(otfnal):
         assert nset == 1, "Not implemented for nset > 1"
 
         make_rho = (make_rho_alpha, make_rho_beta)
-        
+
         for ao_k1, ao_k2, mask, weight, _ \
             in ni.block_loop(ot.cell, ot.grids, nao, deriv=dens_deriv, kpts=kpts, 
                              max_memory=max_memory):
@@ -268,7 +268,7 @@ def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class):
     logger.info(cell, 'Periodic OT-FNAL class is used')
     return new_func_class
 
-def get_pbc_otfnal(kmc_or_kmf_or_cell, otxc):
+def get_pbc_otfnal_gamma(kmc_or_kmf_or_cell, otxc):
     return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_gamma)
 
 def get_pbc_otfnal_kpts(kmc_or_kmf_or_cell, otxc):

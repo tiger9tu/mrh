@@ -3,7 +3,7 @@ import numpy as np
 from pyscf.mcpdft.mcpdft import _PDFT
 from pyscf.pbc.dft import gen_grid as pbc_gen_grid
 
-from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_otfnal
+from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_otfnal_kpts
 
 '''
 Author: Bhavnesh Jangid
@@ -28,7 +28,7 @@ class _kMCPDFT(_PDFT):
 
         if isinstance(my_ot, (str, np.bytes_)):
             # Note: I have changed the input arg. for below function.
-            self.otfnal = get_pbc_otfnal(self._scf, my_ot)
+            self.otfnal = get_pbc_otfnal_kpts(self._scf, my_ot)
         else:
             self.otfnal = my_ot
 
