@@ -1,10 +1,8 @@
 #!/bin/bash
-
 import copy
-import numpy as np
 
-from pyscf.pbc import scf, dft
 from pyscf import mcscf
+from pyscf.pbc import scf, dft
 
 from mrh.my_pyscf.pbc import mcscf as pbc_mcscf
 from mrh.my_pyscf.pbc.mcpdft.mcpdft import get_mcpdft_child_class as get_pbc_mcpdft_child_class_gamma
@@ -25,7 +23,8 @@ def _sanity_check_for_kmf(kmf0):
 
     if isinstance(kmf0, dft.krks.KRKS) or isinstance(kmf0, dft.kuks.KUKS) \
         or isinstance(kmf0, dft.rks.RKS) or isinstance(kmf0, dft.uks.UKS):
-        kmf0 = scf.addons.convert_to_rhf(kmf0)
+        raise NotImplementedError("k-MCPDFT only works with periodic HF objects.")
+        # In this case, probably one need to regenerate the 3C integrals.
 
     if isinstance(kmf0, scf.kuhf.KUHF):
         kmf0 = scf.addons.convert_to_rhf(kmf0)
