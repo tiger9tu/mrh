@@ -1,8 +1,11 @@
+# !/bin/bash
+
 import numpy as np
 from pyscf.lib import logger
 
 from pyscf.dft.numint import _dot_ao_dm
 
+# Author: Bhavnesh Jangid
 
 def _grid_ao2mo_kpts(cell, ao, mo_coeff, non0tab=None,
                      shls_slice=None, ao_loc=None):
@@ -24,7 +27,6 @@ def _grid_ao2mo_kpts(cell, ao, mo_coeff, non0tab=None,
             non0tab is used for every k-point.
         shls_slice : tuple or None
             AO shell range.
-
         ao_loc : ndarray or None
             AO offsets for each shell.
 
@@ -35,8 +37,10 @@ def _grid_ao2mo_kpts(cell, ao, mo_coeff, non0tab=None,
             The underlying storage is arranged so that the grid index
             is contiguous for each derivative, MO, and k-point.
     '''
+
     ao = np.asarray(ao)
     mo_coeff = np.asarray(mo_coeff)
+
     assert ao.ndim == 4, 'ao must have shape (nkpts, nderiv, ngrids, nao)'
     assert mo_coeff.ndim == 3, 'mo_coeff must have shape (nkpts, nao, nmo)'
     nkpts, nderiv, ngrids, nao = ao.shape
@@ -63,7 +67,6 @@ def _grid_ao2mo_kpts(cell, ao, mo_coeff, non0tab=None,
                 ao_loc,
                 out=mo[k, ideriv],)
     return mo
-
 
 
 def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
@@ -116,6 +119,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         Pi : ndarray of shape (ngrids,)
             On-top pair density.
     '''
+
     assert deriv == 1, 'Only zeroth-order on-top pair density is implemented'
 
     rho = np.asarray(rho)
@@ -135,7 +139,8 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     #     phi[k,g,u] = sum_mu ao[k,g,mu] * C[k,mu,u]
     t0 = (logger.process_clock (), logger.perf_counter ())
 
-    grid2amo = _grid_ao2mo_kpts(ot.cell, ao[:, 0][:, None, :, :], mo_cas,non0tab=non0tab,)[:, 0]
+    grid2amo = _grid_ao2mo_kpts(ot.cell, ao[:, 0][:, None, :, :], 
+                                mo_cas,non0tab=non0tab,)[:, 0]
     dtype = np.result_type(rho.dtype, grid2amo.dtype, cascm2.dtype,)
     Pi_shape = ((1,4,5)[deriv], rho.shape[-1])
     Pi = np.zeros(Pi_shape, dtype=dtype)
@@ -186,4 +191,6 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     Pi += Pi_connected / (2.0 * nkpts**2)
     t0 = logger.timer_debug1 (ot, 'otpd takes: ', *t0)
     return Pi.real
+
+
 

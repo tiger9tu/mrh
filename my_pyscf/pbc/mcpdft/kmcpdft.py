@@ -5,7 +5,6 @@ from pyscf.lib import logger
 from pyscf.mcpdft.mcpdft import _PDFT
 from pyscf.mcpdft import _dms
 from pyscf.pbc.dft import gen_grid as pbc_gen_grid
-from pyscf.mcpdft._dms import _get_fcisolver
 
 from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_otfnal_kpts
 from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
@@ -14,6 +13,8 @@ from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
 Author: Bhavnesh Jangid
 k-MC-PDFT for periodic systems at the gamma point or k-points.
 '''
+
+_get_fcisolver = _dms._get_fcisolver
 
 # Need to redefine the casdm1s and casdm2 because of shape mismatch.
 def make_one_casdm1s (mc, ci, state=0):
@@ -54,6 +55,7 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
     # Get the MO_PHASE:
     mo_phase = get_mo_coeff_k2R(mc._scf, mo_coeff, ncore, ncas, kmesh=kmesh)[-1]
     log = logger.new_logger(mc, verbose=verbose)
+
     # First, transform the casdm1s to dm1s for each k-point.
     dm1s_kpts = []
     for k in range(nkpts):
@@ -172,7 +174,22 @@ class _kMCPDFT(_PDFT):
     make_one_casdm2 = make_one_casdm2
     energy_mcwfn = energy_mcwfn
 
+    def dump_chk(self, *args, **kwargs):
+        logger.warn(self, "dump_chk is not supported for k-MC-PDFT")
+        pass
 
+    def nuc_grad_method(self):
+        raise NotImplementedError("Nuclear gradients are not implemented for k-MC-PDFT")
+    
+    def dip_moment(self):
+        raise NotImplementedError("Dipole moment is not implemented for k-MC-PDFT")
+    
+    def get_energy_decomposition(self, *args, **kwargs):
+        raise NotImplementedError("Energy decomposition is not implemented for k-MC-PDFT")
+
+    def update_from_chk(self, chkfile=None, **kwargs):
+        raise NotImplementedError("update_from_chk is not implemented for k-MC-PDFT")
+    
 def get_mcpdft_child_class(kmc, ot, **kwargs):
     mc_doc = (kmc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
 
@@ -185,10 +202,14 @@ def get_mcpdft_child_class(kmc, ot, **kwargs):
         
         def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None, otxc=None,
                                  grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
-
-            '''
-            TODO: Make sure the ot and underlying numint are compatible with periodic systems.
-            '''
+            # Some sanity checks:
+            if ot is not None:
+                assert isinstance(ot, _kMCPDFT.__class__)
+                cell_kpts_info = [getattr(ot, 'kmesh', None), 
+                                  getattr(ot, 'kpts', None), 
+                                  getattr(ot, 'cell', None)]
+                assert None not in cell_kpts_info, \
+                    "The kmesh and kpts attributes should be set in the otfnal object"
             assert dump_chk is False, "dump_chk is not supported for k-MC-PDFT"
             return _kMCPDFT.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
                     grids_level=grids_level, grids_attr=grids_attr, dump_chk=False, **kwargs)
