@@ -64,5 +64,5 @@ kmc.fcisolver = csf_solver(cell, smult=1)
 kmc.max_cycle_macro = 50
 kmc.kernel(mo_coeff)
 
-print(f"k-RHF energy: {kmf.e_tot.real:12.8f}")
-print(f"k-CASSCF energy: {kmc.e_tot.real:12.8f}")
+print(f"k-UHF energy: {kmf.e_tot.real:12.8f}")
+print(f"k-MC-PDFT energy: {kmc.e_tot.real:12.8f}")

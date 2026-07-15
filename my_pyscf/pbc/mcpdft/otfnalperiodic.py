@@ -74,7 +74,8 @@ class otfnalperiodic_gamma(otfnal):
             return E_ot
         
         dens_deriv = ot.dens_deriv
-
+        Pi_deriv = ot.Pi_deriv
+        
         nao = mo_coeff.shape[0]
         ncas = casdm2.shape[0]
         cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
@@ -96,7 +97,7 @@ class otfnalperiodic_gamma(otfnal):
             rho = np.asarray ([m[0] (0, ao_k1, mask, xctype) for m in make_rho])
             t0 = logger.timer (ot, 'untransformed density', *t0)
             Pi = get_ontop_pair_density (ot, rho, ao_k1, cascm2, mo_cas,
-                dens_deriv, mask)
+                Pi_deriv, mask)
             t0 = logger.timer (ot, 'on-top pair density calculation', *t0)
             if rho.ndim == 2:
                 rho = np.expand_dims (rho, 1)
@@ -139,7 +140,7 @@ class otfnalperiodic_kpts(otfnal):
         assert mo_coeff.ndim == 3, "The mo_coeff should be 3D array for k-points calculations"
         
         dens_deriv = ot.dens_deriv
-
+        Pi_deriv = ot.Pi_deriv
         nao = mo_coeff[0].shape[0]
         ncastot = casdm2.shape[0]
         nkpts = mo_coeff.shape[0]
@@ -203,7 +204,7 @@ class otfnalperiodic_kpts(otfnal):
             
             t0 = logger.timer (ot, 'untransformed density', *t0)
             Pi = get_ontop_pair_density_kpts (ot, rho, ao_k2, cascm2_kpts, mo_cas,
-                                              kconserv, deriv=dens_deriv, non0tab=mask)
+                                              kconserv, deriv=Pi_deriv, non0tab=mask)
             t0 = logger.timer (ot, 'on-top pair density calculation', *t0)
             if rho.ndim == 2:
                 rho = np.expand_dims (rho, 1)
