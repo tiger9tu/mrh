@@ -119,8 +119,10 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         Pi : ndarray of shape (ngrids,)
             On-top pair density.
     '''
+    assert deriv <= 1, 'Only zeroth-order on-top pair density is implemented'
 
-    assert deriv == 1, 'Only zeroth-order on-top pair density is implemented'
+    rho_reshape = False
+    ao_reshape = False
 
     rho = np.asarray(rho)
     ao = np.asarray(ao)
@@ -130,11 +132,21 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
 
     # Some sanity checks:
     assert mo_cas.shape[0] == ao.shape[0] == cascm2.shape[0]
-    assert rho.ndim == 3 and rho.shape[0] == 2, 'rho must have shape (2,*,ngrids)'
+
+    if rho.ndim == 2 and rho.shape[0] == 2:
+        rho = np.expand_dims(rho, 1)
+        rho_reshape = True
     
     nkpts = mo_cas.shape[0]
     ngrids, nao = ao.shape[-2:]
+    
+    if ao.ndim == 3 and ao.shape[0] == nkpts:
+        ao = np.expand_dims(ao, 1)
+        ao_reshape = True
 
+    assert rho.ndim == 3 and rho.shape[0] == 2, 'rho must have shape (2,*,ngrids)'
+    assert ao.ndim == 4 and ao.shape[0] == nkpts, 'ao must have shape (nkpts,[comp],ngrids,nao)'
+   
     # Evaluate active Bloch MOs on the grid:
     #     phi[k,g,u] = sum_mu ao[k,g,mu] * C[k,mu,u]
     t0 = (logger.process_clock (), logger.perf_counter ())
@@ -190,6 +202,12 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     # Don't forget to normalize it by number of k-points.
     Pi += Pi_connected / (2.0 * nkpts**2)
     t0 = logger.timer_debug1 (ot, 'otpd takes: ', *t0)
+
+    if rho_reshape:
+        rho = np.squeeze(rho, 1)
+        Pi = Pi.reshape(Pi.shape[1])
+    if ao_reshape:
+        ao = np.squeeze(ao, 1)
     return Pi.real
 
 
