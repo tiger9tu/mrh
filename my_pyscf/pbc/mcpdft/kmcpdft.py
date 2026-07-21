@@ -16,6 +16,48 @@ k-MC-PDFT for periodic systems at the gamma point or k-points.
 
 _get_fcisolver = _dms._get_fcisolver
 
+
+def dm2_cumulant(dm2, dm1s):
+    '''
+    Compute the cumulant of a 2-electron density matrix with respect to a 1-electron density matrix.
+
+    Args:
+        dm2 : ndarray of shape (ncas, ncas, ncas, ncas)
+            2-electron density matrix
+        dm1s : ndarray of shape (2, ncas, ncas)
+            1-electron density matrices for each spin
+
+    Returns:
+        cm2 : ndarray of shape (ncas, ncas, ncas, ncas)
+            2-electron cumulant
+    '''
+    
+    dm1s = np.asarray(dm1s)
+
+    if len(dm1s.shape) < 3:
+        dm1 = dm1s.copy()
+        dm1s = dm1 / 2
+        dm1s = np.stack((dm1s, dm1s), axis=0)
+    else:
+        dm1 = dm1s[0] + dm1s[1]
+
+    dm1a, dm1b = dm1s
+
+    # Compute the disconnected part of the 2-RDM
+    disc = np.multiply.outer(dm1, dm1)
+    disc -= np.multiply.outer(dm1a, dm1a).transpose(0, 3, 2, 1)
+    disc -= np.multiply.outer(dm1b, dm1b).transpose(0, 3, 2, 1)
+
+    # Hermitize disconnected part
+    disc = 0.5 * (disc + disc.transpose(2, 3, 0, 1).conj())
+
+    # Hermitize dm2 as well, defensively
+    dm2h = 0.5 * (dm2 + dm2.transpose(2, 3, 0, 1).conj())
+
+    cm2 = dm2h - disc
+
+    return cm2
+
 # Need to redefine the casdm1s and casdm2 because of shape mismatch.
 def make_one_casdm1s (mc, ci, state=0):
     nkpts = mc.nkpts
@@ -70,12 +112,17 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
     dm1s_kpts = np.stack([np.asarray(dm1s) for dm1s in dm1s_kpts], axis=1,)
     
     # Now compute the cascm2:
-    cascm2 = _dms.dm2_cumulant(casdm2, casdm1s)
+    cascm2 = dm2_cumulant(casdm2, casdm1s)
+    
+    assert np.max(np.abs(cascm2 - cascm2.transpose(1,0,3,2))) < 1e-12, "Cumulant is not Hermitian"
+    assert np.max((cascm2 - cascm2.transpose(2,3,0,1).conj()).real) < 1e-12 \
+        and np.max((cascm2 - cascm2.transpose(2,3,0,1).conj()).imag) < 1e-12, \
+            "Cumulant is not Hermitian"
 
     hyb_x, hyb_c = ot._numint.rsh_and_hybrid_coeff(ot.otxc, mc.mol.spin)[2]
 
     Vnn = mc.energy_nuc()
-    h1e_kpts = mc.get_hcore()
+    h1e_kpts = mc.get_hcore(kpts=mc.kpts)
     
     assert h1e_kpts.ndim == 3 and dm1s_kpts.ndim == 4 and \
         h1e_kpts.shape == dm1s_kpts[0].shape == dm1s_kpts[1].shape, \
@@ -83,14 +130,16 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
 
     dm1_kpts = np.array([dm1s_kpts[0][i] + dm1s_kpts[1][i] 
                          for i in range(nkpts)])
+    
     if log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10:
-        vj_kpts, vk_kpts = mc._scf.get_jk(cell, dm_kpts=dm1s_kpts)
+        vj_kpts, vk_kpts = mc._scf.get_jk(cell, dm_kpts=dm1s_kpts, kpts=mc.kpts)
         vj_kpts = vj_kpts[0] + vj_kpts[1] # (nkpts, nao, nao)
     else:
-        vj_kpts = mc._scf.get_j(cell, dm_kpts=dm1_kpts)
-
-    Te_Vne = 1./nkpts * np.einsum('kij,kji->', dm1_kpts, h1e_kpts)
-    E_j = 1./nkpts * np.einsum('kij,kji->', dm1_kpts, vj_kpts) * 0.5
+        vj_kpts = mc._scf.get_jk(cell, dm_kpts=dm1_kpts, kpts=mc.kpts, hermi=1, with_k=False)[0]
+        
+        
+    Te_Vne = 1./nkpts * np.einsum('kij,kji->', h1e_kpts, dm1_kpts)
+    E_j = 1./nkpts * np.einsum('kij,kji->',vj_kpts, dm1_kpts) * 0.5
 
     log.debug('CAS energy decomposition:')
     log.debug('Vnn = %s', Vnn)
@@ -119,11 +168,12 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
         aeri = mc.get_h2eff(mo_coeff = mo_coeff)
         ncastot = mc.ncas * mc.nkpts
         assert aeri.ndim == 4 and aeri.shape == (ncastot,)*4
-        E_c = np.tensordot(aeri, cascm2, axes=4) / 2*nkpts**2
+        E_c = np.tensordot(aeri, cascm2, axes=4) / (2 * nkpts**2)
         log.debug("E_c = %s", E_c)
         log.debug("Adding (%s) * E_c = %s", hyb_c, hyb_c * E_c)
 
     e_mcwfn = Vnn + Te_Vne + E_j + (hyb_x * E_x) + (hyb_c * E_c)
+    
     return e_mcwfn
 
 
