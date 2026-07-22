@@ -119,7 +119,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         Pi : ndarray of shape (ngrids,)
             On-top pair density.
     '''
-    assert deriv <= 1, 'Only zeroth-order on-top pair density is implemented'
+    assert deriv <= 0, 'Only zeroth-order on-top pair density is implemented'
 
     rho_reshape = False
     ao_reshape = False
@@ -138,7 +138,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         rho_reshape = True
     
     nkpts = mo_cas.shape[0]
-    ngrids, nao = ao.shape[-2:]
+    ngrids, _ = ao.shape[-2:]
     
     if ao.ndim == 3 and ao.shape[0] == nkpts:
         ao = np.expand_dims(ao, 1)
@@ -160,7 +160,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     # Disconnected contribution. Note that, rho is assumed to already be
     # k-point averaged.
     # Pi = rho_alpha * rho_beta
-    Pi += rho[0, 0] * rho[1, 0]
+    Pi[0] += rho[0, 0] * rho[1, 0]
 
     # Time for the connected parts:
     Pi_connected = np.zeros(ngrids, dtype=dtype,)
@@ -200,7 +200,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
                 Pi_connected += (gridkern_right * wrk).sum(axis=(1, 2))
 
     # Don't forget to normalize it by number of k-points.
-    Pi += Pi_connected / (2.0 * nkpts**2)
+    Pi[0] += (Pi_connected / (2.0 * nkpts**2))
     t0 = logger.timer_debug1 (ot, 'otpd takes: ', *t0)
 
     if rho_reshape:
@@ -209,6 +209,7 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
     if ao_reshape:
         ao = np.squeeze(ao, 1)
     return Pi.real
+
 
 
 
