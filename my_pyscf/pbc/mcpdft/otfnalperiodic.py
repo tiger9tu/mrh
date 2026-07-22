@@ -28,7 +28,8 @@ def redefine_fnal(original_fnal, new_parent, **kwargs):
     new_fnal = lib.view(original_fnal, transfnal)
 
     # Hack to pass on the cell and the kpts info to ot object.
-    # otherwise I need to refactor the whole code to pass the cell and kpts info to ot object.
+    # otherwise I need to refactor the whole code to pass the cell 
+    # and kpts info to ot object.
     for key, value in kwargs.items():
         setattr(new_fnal, key, value)
     return new_fnal
@@ -78,6 +79,8 @@ class otfnalperiodic_gamma(otfnal):
         
         nao = mo_coeff.shape[0]
         ncas = casdm2.shape[0]
+
+        # First construct the cumulant then transform it to block mo-orbitals basis.
         cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
         
         dm1s = _dms.casdm1s_to_dm1s (ot, casdm1s, mo_coeff=mo_coeff, ncore=ncore,
@@ -157,10 +160,10 @@ class otfnalperiodic_kpts(otfnal):
         
         assert casdm2.shape == (ncastot,)*4
         assert casdm1s[0].shape == casdm1s[1].shape == (ncastot, ncastot)
-        
-        # First construct the cumulant then transform it to block mo-orbitals basis.
+
         cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
         cascm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
+
         kconserv = kpts_helper.get_kconserv(cell, kpts)
         for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             k4 = kconserv[k1, k2, k3]
@@ -172,7 +175,7 @@ class otfnalperiodic_kpts(otfnal):
         for k in range(nkpts):
             casdm1s_k = [reduce(np.dot, (mo_phase[k], casdm1s_, mo_phase[k].conj().T)) 
                         for casdm1s_ in casdm1s]
-            dm1s =_dms.casdm1s_to_dm1s (ot, casdm1s_k, mo_coeff=mo_coeff[k], ncore=ncore, 
+            dm1s = _dms.casdm1s_to_dm1s (ot, casdm1s_k, mo_coeff=mo_coeff[k], ncore=ncore, 
                                          ncas=ncas)
             dm1s_kpts.append(dm1s)
         
@@ -218,7 +221,8 @@ class otfnalperiodic_kpts(otfnal):
 
 def _get_ks_obj(kmc_or_kmf_or_cell, khf=False, kpts=None):
     '''
-    Initialize KS object with app. density fitting object GDF, MDF or FFTDF
+    Initialize KS object with appropriate density fitting object GDF, 
+    MDF or FFTDF
     args:
         kmc_or_kmf_or_cell : kMC or kMF object with cell object
     returns:
@@ -245,7 +249,8 @@ def _get_ks_obj(kmc_or_kmf_or_cell, khf=False, kpts=None):
     return ks
 
 
-def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class, cell_kptsinfo={}):
+def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class, 
+                    cell_kptsinfo={}):
     '''
     This is wrapper function to get the appropriate fnal class 
     for the given cell object
@@ -275,14 +280,16 @@ def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class, cell_kptsinf
         xc_base = xc_base[1:]
         ks.xc = xc_base
         org_transfnal = transfnal(ks)
-        new_func_class = redefine_transfnal (org_transfnal, otfnalperiodic_class, **cell_kptsinfo)
+        new_func_class = redefine_transfnal (org_transfnal, 
+                                             otfnalperiodic_class, **cell_kptsinfo)
         del org_transfnal
 
     elif fnal_class_type == 'ftransfnal':
         xc_base = xc_base[2:]
         ks.xc = xc_base
         org_ftransfnal = ftransfnal(ks)
-        new_func_class = redefine_ftransfnal (org_ftransfnal, otfnalperiodic_class, **cell_kptsinfo)
+        new_func_class = redefine_ftransfnal (org_ftransfnal, 
+                                              otfnalperiodic_class, **cell_kptsinfo)
         del org_ftransfnal
     else:
         raise ValueError ("The fnal class is not recognized")
@@ -297,8 +304,15 @@ def get_pbc_otfnal_kpts(kmc_or_kmf_or_cell, otxc):
     cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
     kpts = getattr(kmc_or_kmf_or_cell, 'kpts', None)
     kmesh = getattr(kmc_or_kmf_or_cell, 'kmesh', None)
+
     assert kpts is not None, "kpts is required for kpts-based OT-FNAL"
     assert kmesh is not None, "kmesh is required for kpts-based OT-FNAL"
-    cell_kptsinfo = {'cell': cell, 'kpts': kpts, 'kmesh': kmesh}
-    return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_kpts, cell_kptsinfo=cell_kptsinfo)
+
+    cell_kptsinfo = {
+        'cell': cell, 
+        'kpts': kpts, 
+        'kmesh': kmesh}
+
+    return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_kpts, 
+                           cell_kptsinfo=cell_kptsinfo)
 
