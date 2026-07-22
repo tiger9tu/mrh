@@ -16,50 +16,14 @@ k-MC-PDFT for periodic systems at the gamma point or k-points.
 
 _get_fcisolver = _dms._get_fcisolver
 
-
-def dm2_cumulant(dm2, dm1s):
-    '''
-    Compute the cumulant of a 2-electron density matrix with respect to a 1-electron density matrix.
-
-    Args:
-        dm2 : ndarray of shape (ncas, ncas, ncas, ncas)
-            2-electron density matrix
-        dm1s : ndarray of shape (2, ncas, ncas)
-            1-electron density matrices for each spin
-
-    Returns:
-        cm2 : ndarray of shape (ncas, ncas, ncas, ncas)
-            2-electron cumulant
-    '''
-    
-    dm1s = np.asarray(dm1s)
-
-    if len(dm1s.shape) < 3:
-        dm1 = dm1s.copy()
-        dm1s = dm1 / 2
-        dm1s = np.stack((dm1s, dm1s), axis=0)
-    else:
-        dm1 = dm1s[0] + dm1s[1]
-
-    dm1a, dm1b = dm1s
-
-    # Compute the disconnected part of the 2-RDM
-    disc = np.multiply.outer(dm1, dm1)
-    disc -= np.multiply.outer(dm1a, dm1a).transpose(0, 3, 2, 1)
-    disc -= np.multiply.outer(dm1b, dm1b).transpose(0, 3, 2, 1)
-
-    # Hermitize disconnected part
-    disc = 0.5 * (disc + disc.transpose(2, 3, 0, 1).conj())
-
-    # Hermitize dm2 as well, defensively
-    dm2h = 0.5 * (dm2 + dm2.transpose(2, 3, 0, 1).conj())
-
-    cm2 = dm2h - disc
-
-    return cm2
-
 # Need to redefine the casdm1s and casdm2 because of shape mismatch.
 def make_one_casdm1s (mc, ci, state=0):
+    '''
+    Spin-separated 1-RDMs.
+    Note: the returned RDM1a, and RDM1b are in the shape of (ncas*nkpts, ncas*nkpts)
+    and not (ncas, ncas) and in wannier orbital basis. Transform it before using 
+    it k-pts machinary.
+    '''
     nkpts = mc.nkpts
     ncastot = mc.ncas *  nkpts
     fcisolver, ci, nelecas = _get_fcisolver (mc, ci, state=state)
@@ -67,6 +31,12 @@ def make_one_casdm1s (mc, ci, state=0):
     return fcisolver.make_rdm1s (ci, ncastot, nelecastot)
 
 def make_one_casdm2 (mc, ci, state=0):
+    '''
+    Spin-summed 2-RDM
+    Note: the returned RDM2 is in the shape of (ncas*nkpts, ncas*nkpts, ncas*nkpts, ncas*nkpts)
+    and not (ncas, ncas, ncas, ncas) and in wannier orbital basis. Transform it before using 
+    it k-pts machinary.
+    '''
     ncas = mc.ncas
     fcisolver, ci, nelecas = _get_fcisolver (mc, ci, state=state)
     ncastot = ncas * mc.nkpts
@@ -109,16 +79,9 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
     
     # Making sure the tagging the dm1s doesn't create the weird problems
     # for pbc.
-    dm1s_kpts = np.stack([np.asarray(dm1s) for dm1s in dm1s_kpts], axis=1,)
+    dm1s_kpts = np.stack([np.asarray(dm1s) 
+                          for dm1s in dm1s_kpts], axis=1,)
     
-    # Now compute the cascm2:
-    cascm2 = dm2_cumulant(casdm2, casdm1s)
-    
-    assert np.max(np.abs(cascm2 - cascm2.transpose(1,0,3,2))) < 1e-12, "Cumulant is not Hermitian"
-    assert np.max((cascm2 - cascm2.transpose(2,3,0,1).conj()).real) < 1e-12 \
-        and np.max((cascm2 - cascm2.transpose(2,3,0,1).conj()).imag) < 1e-12, \
-            "Cumulant is not Hermitian"
-
     hyb_x, hyb_c = ot._numint.rsh_and_hybrid_coeff(ot.otxc, mc.mol.spin)[2]
 
     Vnn = mc.energy_nuc()
@@ -135,7 +98,8 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
         vj_kpts, vk_kpts = mc._scf.get_jk(cell, dm_kpts=dm1s_kpts, kpts=mc.kpts)
         vj_kpts = vj_kpts[0] + vj_kpts[1] # (nkpts, nao, nao)
     else:
-        vj_kpts = mc._scf.get_jk(cell, dm_kpts=dm1_kpts, kpts=mc.kpts, hermi=1, with_k=False)[0]
+        vj_kpts = mc._scf.get_jk(cell, dm_kpts=dm1_kpts, kpts=mc.kpts, 
+                                 hermi=1, with_k=False)[0]
         
         
     Te_Vne = 1./nkpts * np.einsum('kij,kji->', h1e_kpts, dm1_kpts)
@@ -165,6 +129,8 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
     # g_pqrs * l_pqrs / 2
     E_c = 0.0
     if log.verbose >= logger.DEBUG or abs(hyb_c) > 1e-10:
+        # Now compute the cascm2:
+        cascm2 = _dms.dm2_cumulant(casdm2, casdm1s)
         aeri = mc.get_h2eff(mo_coeff = mo_coeff)
         ncastot = mc.ncas * mc.nkpts
         assert aeri.ndim == 4 and aeri.shape == (ncastot,)*4
@@ -180,7 +146,7 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
 class _kMCPDFT(_PDFT):
     '''
     k-MC-PDFT for periodic systems at the gamma point or k-points.
-    This class is making sure, the functionalities which are not 
+    This class is adding or replacing the functionalities which are not 
     compatible with periodic systems are throwing NotImplementedError. 
     '''
 
