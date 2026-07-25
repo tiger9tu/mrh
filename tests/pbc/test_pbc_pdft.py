@@ -33,7 +33,7 @@ def build_cell():
     return cell
 
 class KnownValues(unittest.TestCase):
-    def test_h2(self):
+    def test_mcpdft_gamma_point(self):
         from mrh.my_pyscf import mcpdft
         cell = gto.M(a = np.eye(3)*5,
         atom = '''
