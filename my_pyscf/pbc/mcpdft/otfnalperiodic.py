@@ -18,7 +18,7 @@ from mrh.my_pyscf.pbc.mcscf import mc1step as pbc_mc1step, casci as pbc_casci
 from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R_wokmf
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts as _basis_transform_casdm2_kpts
 from mrh.my_pyscf.pbc.mcpdft.kotpd import get_ontop_pair_density_kpts
-
+from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 
 # Author: Bhavnesh Jangid
 
@@ -81,7 +81,7 @@ class otfnalperiodic_gamma(otfnal):
         ncas = casdm2.shape[0]
 
         # First construct the cumulant then transform it to block mo-orbitals basis.
-        cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
+        cascm2 = _dms.dm2_cumulant(casdm2, casdm1s)
         
         dm1s = _dms.casdm1s_to_dm1s (ot, casdm1s, mo_coeff=mo_coeff, ncore=ncore,
                                     ncas=ncas)
@@ -161,7 +161,8 @@ class otfnalperiodic_kpts(otfnal):
         assert casdm2.shape == (ncastot,)*4
         assert casdm1s[0].shape == casdm1s[1].shape == (ncastot, ncastot)
 
-        cascm2 = _dms.dm2_cumulant (casdm2, casdm1s)
+        # We need to use the modified dm2_cumulant function for complex orbitals.
+        cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
         cascm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
 
         kconserv = kpts_helper.get_kconserv(cell, kpts)
