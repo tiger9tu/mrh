@@ -134,7 +134,7 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
         aeri = mc.get_h2eff(mo_coeff = mo_coeff)
         ncastot = mc.ncas * mc.nkpts
         assert aeri.ndim == 4 and aeri.shape == (ncastot,)*4
-        E_c = np.tensordot(aeri, cascm2, axes=4) / (2 * nkpts**2)
+        E_c = np.tensordot(aeri, cascm2, axes=4) / (2 * nkpts)
         log.debug("E_c = %s", E_c)
         log.debug("Adding (%s) * E_c = %s", hyb_c, hyb_c * E_c)
 
