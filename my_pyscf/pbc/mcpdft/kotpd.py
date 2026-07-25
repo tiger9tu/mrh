@@ -80,10 +80,10 @@ def get_ontop_pair_density_kpts(ot, rho, ao, cascm2, mo_cas,
         Lambda(r) = 1 /(2 *Nk**2)
             * sum_{k1,k2,k3}
             * sum_{u,v,x,y}
-                phi_{u,k1}(r)
+                phi_{u,k1}^*(r)
                 phi_{v,k2}(r)
                 cascm2[k1,k2,k3,u,v,x,y]
-                phi_{x,k3}(r)
+                phi_{x,k3}^*(r)
                 phi_{y,k4}(r)
 
     and k4 is determined from momentum conservation:
