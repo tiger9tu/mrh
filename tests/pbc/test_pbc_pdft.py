@@ -186,5 +186,5 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(e_kmcpdft.real, e_mcpdft/nkpts, 4)
 
 if __name__ == "__main__":
-    print("Full Tests for PBC-PDFT")
+    print("Full Tests for PBC-PDFT (k-MC-PDFT)")
     unittest.main()
