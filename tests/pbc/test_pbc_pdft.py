@@ -1,10 +1,11 @@
 import unittest
 import numpy as np
 
+from pyscf.pbc import gto, scf, dft
 
 from mrh.my_pyscf.fci import csf_solver as mol_csf_solver
 from mrh.my_pyscf.pbc.fci import csf_solver
-from pyscf.pbc import gto, scf, dft, lib
+from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 from mrh.my_pyscf.pbc.mcscf import avas
 
 # Author: Bhavnesh Jangid
@@ -13,10 +14,16 @@ from mrh.my_pyscf.pbc.mcscf import avas
 Test cases for the PBC PDFT module.
 Test-1: Gamma point MC-PDFT
 Test-2: k-MCPDFT in the limit of single determinant should match k-DFT results.
-Test-3: k-MC-PDFT results should match the supercell MC-PDFT results for 
+Test-3: k-MC-PDFT results should match the supercell MC-PDFT results for
     the same system computed with a supercell of the same size as the k-mesh. Provided
     the grids and other details are the same.
+Test-4: The complex cumulant should be covariant under orbital rotations.
 '''
+
+my_grids = {'prune': False,
+            'radii_adjust': None,
+            'level': 6,}
+
 
 def build_cell():
     cell = gto.Cell()
@@ -33,6 +40,40 @@ def build_cell():
     return cell
 
 class KnownValues(unittest.TestCase):
+    def test_kmcpdft_cumulant(self):
+        rng = np.random.default_rng(12)
+        norb = 4
+
+        x = rng.normal(size=(norb, norb))
+        x = x + 1j * rng.normal(size=x.shape)
+        u = np.linalg.qr(x)[0]
+
+        dm1s = rng.normal(size=(2, norb, norb))
+        dm1s = dm1s + 1j * rng.normal(size=dm1s.shape)
+        dm1s = dm1s + dm1s.swapaxes(-1, -2).conj()
+
+        dm2 = rng.normal(size=(norb,) * 4)
+        dm2 = dm2 + 1j * rng.normal(size=dm2.shape)
+
+        dm1s_rot = np.einsum(
+            "pi,spq,qj->sij", u, dm1s, u.conj(), optimize=True
+        )
+        dm2_rot = np.einsum(
+            "pi,qj,pqrs,rk,sl->ijkl",
+            u.conj(), u, dm2, u.conj(), u, optimize=True,
+        )
+
+        cumulant = dm2_cumulant_complex(dm2, dm1s)
+        cumulant_rot = dm2_cumulant_complex(dm2_rot, dm1s_rot)
+        cumulant_ref = np.einsum(
+            "pi,qj,pqrs,rk,sl->ijkl",
+            u.conj(), u, cumulant, u.conj(), u, optimize=True,
+        )
+
+        np.testing.assert_allclose(
+            cumulant_rot, cumulant_ref, atol=1e-12, rtol=1e-12
+        )
+
     def test_mcpdft_gamma_point(self):
         from mrh.my_pyscf import mcpdft
         cell = gto.M(a = np.eye(3)*5,
@@ -49,7 +90,7 @@ class KnownValues(unittest.TestCase):
         mf.xc = 'pbe'
         mf.exxdiv = None
         emf = mf.kernel()
-        
+
         mc = mcpdft.CASCI(mf,'tPBE', 1, 2)
         ecasci = mc.kernel(mf.mo_coeff)[0]
 
@@ -78,7 +119,7 @@ class KnownValues(unittest.TestCase):
             kdft.max_cycle = 0
             kdft.kernel(kmf.make_rdm1())
             return kdft.e_tot
-        
+
         e_klda = compute_dft_energy(kmf, kpts, xc='lda')
         e_kpbe = compute_dft_energy(kmf, kpts, xc='pbe')
         e_km06l = compute_dft_energy(kmf, kpts, xc='m06l')
@@ -89,24 +130,36 @@ class KnownValues(unittest.TestCase):
             # For single kpts making the mo_coeff compatible with kmc kernel
             mo_coeff = mo_coeff[None, :, :].astype(np.complex128)
 
-        def compute_kmcpdft_energy(kmf, kpts, kmesh, ot='tPBE', 
+        ncas = 1
+        nelec = (1, 1)
+
+        kmc = mcpdft.KCASSCF(kmf, 'tPBE', ncas, nelec)
+        kmc.kpts = kpts
+        kmc.kmesh = kmesh
+        kmc.fcisolver = csf_solver(cell, smult=abs(nelec[1] - nelec[0]) + 1)
+        kmc.max_cycle_macro = 50
+        kmc.kernel(mo_coeff)
+
+        assert kmc.converged, "k-MC-SCF did not converge"
+
+        e_kmcscf = kmc.e_mcscf
+        mo_coeff = kmc.mo_coeff.copy()
+
+        def compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tPBE',
                                    ncas=1, nelec=(1, 1)):
-            kmc = mcpdft.KCASSCF(kmf, ot, ncas, nelec)
+            kmc = mcpdft.KCASCI(kmf, ot, ncas, nelec)
             kmc.kpts = kpts
             kmc.kmesh = kmesh
             kmc.fcisolver = csf_solver(cell, smult=abs(nelec[1] - nelec[0]) + 1)
-            kmc.max_cycle_macro = 50
-            kmc.kernel(mo_coeff)
+            kmc.kernel(mo_coeff.copy())
+            return kmc.e_tot
 
-            assert kmc.converged, "k-MC-SCF did not converge"
-            return kmc.e_mcscf, kmc.e_tot
-
-        e_kmcscf, e_ktlda = compute_kmcpdft_energy(kmf, kpts, kmesh, ot='tLDA', 
-                                                   ncas=1, nelec=(1, 1))
-        e_kmcscf, e_ktpbe = compute_kmcpdft_energy(kmf, kpts, kmesh, ot='tPBE', 
-                                            ncas=1, nelec=(1, 1))
-        e_kmcscf, e_ktm06l = compute_kmcpdft_energy(kmf, kpts, kmesh, ot='tM06L', 
-                                            ncas=1, nelec=(1, 1))
+        e_ktlda = compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tLDA',
+                                         ncas=ncas, nelec=nelec)
+        e_ktpbe = compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tPBE',
+                                         ncas=ncas, nelec=nelec)
+        e_ktm06l = compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tM06L',
+                                          ncas=ncas, nelec=nelec)
 
         self.assertAlmostEqual(e_khf, e_kmcscf, 7)
         self.assertAlmostEqual(e_klda, e_ktlda, 7)
@@ -128,24 +181,48 @@ class KnownValues(unittest.TestCase):
         kmf.kernel()
 
         e_khf = kmf.e_tot
-        
+
         mo_coeff = avas.kernel(kmf, ['H 1s'], minao=cell.basis)[2]
 
         if np.prod(kmesh) == 1:
             # For single kpts making the mo_coeff compatible with kmc kernel
             mo_coeff = mo_coeff[None, :, :].astype(np.complex128)
 
-        kmc = mcpdft.KCASSCF(kmf, 'tPBE', 2, 2)
+        ncas = 2
+        nelec = (1, 1)
+
+        kmc = mcpdft.KCASSCF(kmf, 'tPBE', ncas, nelec,
+                             grids_attr=my_grids)
         kmc.kpts = kpts
         kmc.kmesh = kmesh
-        kmc.fcisolver = csf_solver(cell, smult=1)
+        kmc.fcisolver = csf_solver(cell, smult=abs(nelec[1] - nelec[0]) + 1)
         kmc.max_cycle_macro = 50
+        kmc.conv_tol = 1e-10
         kmc.kernel(mo_coeff)
 
         assert kmc.converged, "k-MC-SCF did not converge"
 
         e_kmcscf = kmc.e_mcscf
-        e_kmcpdft = kmc.e_tot
+        mo_coeff = kmc.mo_coeff.copy()
+
+        def compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tPBE',
+                                   ncas=2, nelec=(1, 1)):
+            kmc = mcpdft.KCASCI(kmf, ot, ncas, nelec,
+                                grids_attr=my_grids)
+            kmc.kpts = kpts
+            kmc.kmesh = kmesh
+            kmc.fcisolver = csf_solver(cell, smult=abs(nelec[1] - nelec[0]) + 1)
+            kmc.kernel(mo_coeff.copy())
+            return kmc.e_tot
+
+        e_ktlda = compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tLDA',
+                                         ncas=ncas, nelec=nelec)
+        e_ktpbe = compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tPBE',
+                                         ncas=ncas, nelec=nelec)
+        e_ktm06l = compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tM06L',
+                                          ncas=ncas, nelec=nelec)
+        e_kpbe0 = compute_kmcpdft_energy(kmf, kpts, kmesh, mo_coeff, ot='tPBE0',
+                                         ncas=ncas, nelec=nelec)
 
         from pyscf.pbc import tools
         scell = tools.super_cell(cell, kmesh)
@@ -161,29 +238,49 @@ class KnownValues(unittest.TestCase):
         assert mf.converged, "SCF did not converge for the supercell"
 
         nkpts = np.prod(kmesh)
-        ncas = kmc.ncas
-        nelec = kmc.nelecas
         ncas = ncas * nkpts
         nelec = (nelec[0] * nkpts, nelec[1] * nkpts)
-    
+
         mo_coeff = avas.kernel(mf, ['H 1s'], minao=mf.cell.basis)[2]
-    
-        mc = mcpdft.CASSCF(mf, 'tPBE', ncas, nelec)
+
+        mc = mcpdft.CASSCF(mf, 'tPBE', ncas, nelec,
+                           grids_attr=my_grids)
         mc.max_cycle_macro = 50
+        mc.conv_tol = 1e-10
         mc.fcisolver = mol_csf_solver(scell, smult=1)
         mc.kernel(mo_coeff)
 
-        e_mcscf = mc.e_mcscf
-        e_mcpdft = mc.e_tot
-
         assert mc.converged, "MC-SCF did not converge"
-            
+
+        e_mcscf = mc.e_mcscf
+        mo_coeff = mc.mo_coeff.copy()
+
+        def compute_mcpdft_energy(mf, mo_coeff, ot='tPBE',
+                                  ncas=2, nelec=(1, 1)):
+            mc = mcpdft.CASCI(mf, ot, ncas, nelec,
+                              grids_attr=my_grids)
+            mc.fcisolver = mol_csf_solver(scell, smult=1)
+            mc.kernel(mo_coeff.copy())
+            return mc.e_tot
+
+        e_tlda = compute_mcpdft_energy(mf, mo_coeff, ot='tLDA',
+                                       ncas=ncas, nelec=nelec)
+        e_tpbe = compute_mcpdft_energy(mf, mo_coeff, ot='tPBE',
+                                       ncas=ncas, nelec=nelec)
+        e_tm06l = compute_mcpdft_energy(mf, mo_coeff, ot='tM06L',
+                                        ncas=ncas, nelec=nelec)
+        e_tpbe0 = compute_mcpdft_energy(mf, mo_coeff, ot='tPBE0',
+                                        ncas=ncas, nelec=nelec)
+
         self.assertAlmostEqual(e_khf.real, e_hf/nkpts, 7)
         self.assertAlmostEqual(e_kmcscf.real, e_mcscf/nkpts, 7)
 
         # k-MC-PDFT have slightly lower agreement with supercell MC-PDFT
         # due to possible grid differences.
-        self.assertAlmostEqual(e_kmcpdft.real, e_mcpdft/nkpts, 4)
+        self.assertAlmostEqual(e_ktlda.real, e_tlda/nkpts, 6)
+        self.assertAlmostEqual(e_ktpbe.real, e_tpbe/nkpts, 6)
+        self.assertAlmostEqual(e_ktm06l.real, e_tm06l/nkpts, 6)
+        self.assertAlmostEqual(e_kpbe0.real, e_tpbe0/nkpts, 6)
 
 if __name__ == "__main__":
     print("Full Tests for PBC-PDFT (k-MC-PDFT)")
