@@ -8,7 +8,7 @@ from pyscf.pbc.dft import gen_grid as pbc_gen_grid
 
 from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_otfnal_kpts
 from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
-
+from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 '''
 Author: Bhavnesh Jangid
 k-MC-PDFT for periodic systems at the gamma point or k-points.
@@ -130,7 +130,7 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
     E_c = 0.0
     if log.verbose >= logger.DEBUG or abs(hyb_c) > 1e-10:
         # Now compute the cascm2:
-        cascm2 = _dms.dm2_cumulant(casdm2, casdm1s)
+        cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
         aeri = mc.get_h2eff(mo_coeff = mo_coeff)
         ncastot = mc.ncas * mc.nkpts
         assert aeri.ndim == 4 and aeri.shape == (ncastot,)*4
