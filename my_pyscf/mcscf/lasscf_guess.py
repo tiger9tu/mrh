@@ -2,7 +2,32 @@ import numpy as np
 from pyscf.lo import orth
 from pyscf.lib import tag_array, logger
 
-def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_cas_spaces=False):
+def _get_minmax_occs (las, norb_f, nelec_f, smults_f, mo_occ):
+    norb = sum (norb_f)
+    nfrag = len (norb_f)
+    rngs = -np.ones ((nfrag, 3, 2), dtype=int)
+    if mo_occ is None: return rngs
+    assert (len (mo_occ) == norb)
+    ndomo = np.count_nonzero (mo_occ==2)
+    nsomo = np.count_nonzero (mo_occ==1)
+    nuomo = norb - ndomo - nsomo
+    assert (nuomo >= 0)
+    nelec = 2*ndomo + nsomo
+    if (smults_f is not None) and ((smults_f.sum () - nfrag) <= nsomo):
+        spins_f = smults_f - 1
+        rngs[:,1,0] = smults_f - 1
+        rngs[:,1,1] = -(rngs[:,1,0] - rngs[:,1,0].sum ())
+        assert ((rngs[:,1,:]>=0).all ())
+    if (nelec_f is not None) and (nelec_f.sum () == nelec):
+        subt = 0
+        if (rngs[:,1,1]>=0).all ():
+            subt = rngs[:,1,1]
+        rngs[:,2,0] = (nelec_f - subt) // 2
+        rngs[:,2,1] = -(rngs[:,2,0] - rngs[:,2,0].sum ()) 
+    return rngs
+
+def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_cas_spaces=False,
+               mo_occ=None, smults_f=None, nelec_f=None):
     ''' Project active orbitals into sets of orthonormal "fragments" defined by lo_coeff
     and frags_orbs, and orthonormalize inactive and virtual orbitals in the orthogonal complement
     space. Beware that unless freeze_cas_spaces=True, frozen orbitals will not be preserved.
@@ -34,6 +59,18 @@ def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_
             orbitals are projected into the localized-orbital space and
             the inactive and external orbitals are reconstructed as closely
             as possible using SVD.
+        mo_occ: ndarray of shape (nmo)
+            If passed, only orbitals with the same occupancies are mixed with
+            each other to localize them and freeze_cas_spaces is automatically
+            set to True.
+        smults_f: ndarray of ints of shape (nfrag,)
+            Used to constrain how many singly-occupied orbitals (per mo_occ)
+            are assigned to each fragment, if possible. If las is a single-state
+            calculation, its quantum numbers are used as default values.
+        nelec_f: ndarray of ints of shape (nfrag,)
+            Used to constrain how many doubly-occupied orbitals (per mo_occ)
+            are assigned to each fragment, if possible. If las is a single-state
+            calculation, its quantum numbers are used as default values.
 
     Returns:
         mo_coeff: ndarray of shape (nao,nmo)
@@ -54,6 +91,16 @@ def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_
     has_orbsym = hasattr (mo_coeff, 'orbsym')
     mo_orbsym = getattr (mo_coeff, 'orbsym', np.zeros (nmo))
     mo_coeff = mo_coeff.copy () # Safety
+    if mo_occ is not None:
+        freeze_cas_spaces = True
+        mo_occ = mo_occ.copy ()
+        mocc_cas = mo_occ[ncore:nocc]
+    else:
+        mo_occ = np.zeros (nmo, dtype=int)
+        mo_occ[:ncore] = 2
+        mo_occ[ncore:nocc] = 1
+        mocc_cas = None
+    rngs = _get_minmax_occs (las, las.ncas_sub, nelec_f, smults_f, mocc_cas)
 
     # Duplicate AO handling
     dupeAOerr = ValueError (("Cannot assign 1 AO to more than 1 fragment unless active orbitals "
@@ -72,6 +119,7 @@ def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_
 
     # SVD to pick active orbitals
     mo_cas = tag_array (mo_coeff[:,ncore:nocc], orbsym=mo_orbsym[ncore:nocc])
+    mocc_cas = mo_occ[ncore:nocc]
     if freeze_cas_spaces:
         null_coeff = np.hstack ([mo_coeff[:,:ncore], mo_coeff[:,nocc:]])
     else:
@@ -84,12 +132,18 @@ def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_
                 log.warn ('Trying to localize ' + inadAOs)
             else:
                 raise ValueError ("Cannot make " + inadAOs)
-        mo_proj, sval, mo_cas = las._svd (lo_coeff[:,frag_orbs], mo_cas, s=ao_ovlp)
+        mo_proj, sval, mo_cas, mocc_cas = las._svd (lo_coeff[:,frag_orbs], mo_cas, s=ao_ovlp,
+                                                    mo_occ=mocc_cas, rngs=rngs[ix])
+        if len (sval) < nlas:
+            log.error ("Too many active or too few fragment orbitals in fragment %d", ix)
+            raise RuntimeError ("Can't localize active space")
         i, j = ncore + sum (las.ncas_sub[:ix]), ncore + sum (las.ncas_sub[:ix]) + nlas
         mo_las = mo_cas if freeze_cas_spaces else mo_proj
         mo_coeff[:,i:j] = mo_las[:,:nlas]
         if has_orbsym: mo_orbsym[i:j] = mo_las.orbsym[:nlas]
         if freeze_cas_spaces:
+            mo_occ[i:nocc] = mocc_cas
+            mocc_cas = mo_occ[j:nocc]
             if has_orbsym: orbsym = mo_cas.orbsym[nlas:]
             mo_cas = mo_cas[:,nlas:]
             if has_orbsym: mo_cas = tag_array (mo_cas, orbsym=orbsym)
@@ -97,24 +151,45 @@ def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_
             null_coeff = np.hstack ([null_coeff, mo_proj[:,nlas:]])
 
     # SVD of null space to pick inactive orbitals
-    assert (null_coeff.shape[-1] + ncas == nmo)
-    mo_core = tag_array (mo_coeff[:,:ncore], orbsym=mo_orbsym[:ncore])
-    mo_proj, sval, mo_core = las._svd (null_coeff, mo_core, s=ao_ovlp)
-    mo_coeff[:,:ncore], mo_coeff[:,nocc:] = mo_proj[:,:ncore], mo_proj[:,ncore:]
-    if has_orbsym:
-        mo_orbsym[:ncore] = mo_proj.orbsym[:ncore]
-        mo_orbsym[nocc:] = mo_proj.orbsym[ncore:]
+    if ncore > 0:
+        assert (null_coeff.shape[-1] + ncas == nmo)
+        mo_core = tag_array (mo_coeff[:,:ncore], orbsym=mo_orbsym[:ncore])
+        mocc_core = mo_occ[:ncore]
+        mo_proj, sval, mo_core, mocc_core = las._svd (null_coeff, mo_core, s=ao_ovlp,
+                                                      mo_occ=mocc_core)
+        mo_coeff[:,:ncore], mo_coeff[:,nocc:] = mo_proj[:,:ncore], mo_proj[:,ncore:]
+        if has_orbsym:
+            mo_orbsym[:ncore] = mo_proj.orbsym[:ncore]
+            mo_orbsym[nocc:] = mo_proj.orbsym[ncore:]
+    elif nocc < mo_coeff.shape[1]:
+        mo_virt = tag_array (mo_coeff[:,nocc:], orbsym=mo_orbsym[nocc:])
+        mocc_virt = mo_occ[nocc:]
+        mo_proj, sval, mo_virt, mocc_virt = las._svd (null_coeff, mo_virt, s=ao_ovlp,
+                                                      mo_occ=mocc_virt)
+        mo_coeff[:,nocc:] = mo_proj[:,:]
+        if has_orbsym:
+            mo_orbsym[nocc:] = mo_proj.orbsym[:]
+
     mo_coeff = tag_array (mo_coeff, orbsym=mo_orbsym)
 
     # Canonicalize for good init CI guess and visualization
     ranges = [(0,ncore),(nocc,nmo)]
     for ix, di in enumerate (ncas_sub):
         i = ncore + sum (ncas_sub[:ix])
-        ranges.append ((i,i+di))
+        j = i + di
+        idx = np.argsort (-mo_occ[i:j])
+        mo_coeff[:,i:j] = mo_coeff[:,i:j][:,idx]
+        mo_orbsym[i:j] = mo_orbsym[i:j][idx]
+        mo_occ[i:j] = mo_occ[i:j][idx]
+        for m in np.unique (mo_occ[i:j]):
+            idx = np.where (mo_occ[i:j]==m)[0]
+            k = idx[0]
+            l = idx[-1]+1
+            ranges.append ((i+k,i+l))
     fock = mo_coeff.conj ().T @ fock @ mo_coeff
     for i, j in ranges:
         if (j == i): continue
-        e, c = las._eig (fock[i:j,i:j], i, j)
+        e, c = las._eig (fock[i:j,i:j], i, j, mo_orbsym[i:j])
         idx = np.argsort (e)
         mo_coeff[:,i:j] = mo_coeff[:,i:j] @ c[:,idx]
         mo_orbsym[i:j] = mo_orbsym[i:j][idx]
@@ -123,7 +198,8 @@ def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_
     return mo_coeff
 
 def localize_init_guess (las, frags_atoms, mo_coeff=None, spin=None, lo_coeff=None, fock=None,
-                         freeze_cas_spaces=False, frags_by_AOs=False):
+                         mo_occ=None, freeze_cas_spaces=False, frags_by_AOs=False, smults_f=None,
+                         nelec_f=None):
     ''' Project active orbitals into sets of orthonormal "fragments" defined by lo_coeff
     and frags_orbs, and orthonormalize inactive and virtual orbitals in the orthogonal complement
     space. Beware that unless freeze_cas_spaces=True, frozen orbitals will not be preserved.
@@ -146,8 +222,10 @@ def localize_init_guess (las, frags_atoms, mo_coeff=None, spin=None, lo_coeff=No
             Effective 1-electron Hamiltonian matrix for recanonicalizing
             the inactive and external sectors after the latter are
             possibly distorted by the projection of the active orbitals
-        ao_ovlp: ndarray of shape (nao, nao)
-            Overlap matrix of the underlying AO basis
+        mo_occ: ndarray of shape (nmo)
+            If passed, only orbitals with the same occupancies are mixed with
+            each other to localize them and freeze_cas_spaces is automatically
+            set to True.
         freeze_cas_spaces: logical
             If true, then active orbitals are mixed only among themselves
             when localizing, which leaves the inactive and external sectors
@@ -157,12 +235,21 @@ def localize_init_guess (las, frags_atoms, mo_coeff=None, spin=None, lo_coeff=No
             as possible using SVD.
         frags_by_AOs: logical
             If True, interpret integer frags_atoms as AOs rather than atoms
+        smults_f: ndarray of ints of shape (nfrag,)
+            Used to constrain how many singly-occupied orbitals (per mo_occ)
+            are assigned to each fragment, if possible. If las is a single-state
+            calculation, its quantum numbers are used as default values.
+        nelec_f: ndarray of ints of shape (nfrag,)
+            Used to constrain how many doubly-occupied orbitals (per mo_occ)
+            are assigned to each fragment, if possible. If las is a single-state
+            calculation, its quantum numbers are used as default values.
 
     Returns:
         mo_coeff: ndarray of shape (nao,nmo)
             Orbital coefficients after localization of the active space;
             columns in the order (inactive,las1,las2,...,lasn,external)
     '''
+    log = logger.new_logger (las, las.verbose)
     if mo_coeff is None:
         mo_coeff = las.mo_coeff
     if lo_coeff is None:
@@ -174,7 +261,22 @@ def localize_init_guess (las, frags_atoms, mo_coeff=None, spin=None, lo_coeff=No
     frags_orbs = interpret_frags_atoms (las.mol, frags_atoms, frags_by_AOs=frags_by_AOs)
     if fock is None: fock = las._scf.get_fock ()
     ao_ovlp = las._scf.get_ovlp ()
-    return _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_cas_spaces=freeze_cas_spaces)
+    if mo_occ is not None:
+        if np.count_nonzero (mo_occ==1) and (smults_f is None) and (las.nroots > 1):
+            log.warn (("Can't enforce spin distributions for multiple states! Pass "
+                       "smults_f kwarg to localize_init_guess to guarantee even "
+                       "distribution of SOMOs!"))
+        elif np.count_nonzero (mo_occ==1) and (smults_f is None):
+            smults_f = las.get_smults_fr ()[:,0]
+        if (nelec_f is None) and (las.nroots > 1):
+            log.warn (("Can't enforce charge distributions for multiple states! Pass "
+                       "nelec_f kwarg to localize_init_guess to guarantee even "
+                       "distribution of DOMOs!"))
+        elif (nelec_f is None):
+            nelec_f = las.get_nelec_frs ()[:,0,:].sum (1)
+    return _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp,
+                      mo_occ=mo_occ, freeze_cas_spaces=freeze_cas_spaces,
+                      smults_f=smults_f, nelec_f=nelec_f)
 
 def interpret_frags_atoms (mol, frags_atoms, frags_by_AOs=False):
     frags_atoms_int = all ([all ([isinstance (i, (int,np.integer)) for i in j]) for j in frags_atoms])

@@ -6,23 +6,15 @@ import h5py
 import tempfile
 from pyscf.mcpdft.otfnal import transfnal, get_transfnal
 from pyscf.mcpdft.mcpdft import _get_e_decomp
-
-try:
-    from pyscf.mcpdft.mcpdft import _PDFT, _mcscf_env
-except ImportError:
-    msg = "For performing LASPDFT, you will require pyscf-forge.\n" + \
-          "pyscf-forge can be found at : https://github.com/pyscf/pyscf-forge"
-    raise ImportError(msg)
-
+from pyscf.mcpdft.mcpdft import _PDFT, _mcscf_env
 
 def make_casdm1s(filename, i):
     """
     This function stores the rdm1s for the given state 'i' in a tempfile
     """
-    with h5py.File(filename, 'r') as f:
-        rdm1s_key = f'rdm1s_{i}'
-        rdm1s = f[rdm1s_key][:]
-        rdm1s = np.array(rdm1s)
+    rdm1s_key = f'rdm1s_{i}'
+    rdm1s = filename[rdm1s_key][:]
+    rdm1s = np.array(rdm1s)
     return rdm1s
 
 
@@ -30,10 +22,9 @@ def make_casdm2s(filename, i):
     """
     This function stores the rdm2s for the given state 'i' in a tempfile
     """
-    with h5py.File(filename, 'r') as f:
-        rdm2s_key = f'rdm2s_{i}'
-        rdm2s = f[rdm2s_key][:]
-        rdm2s = np.array(rdm2s)
+    rdm2s_key = f'rdm2s_{i}'
+    rdm2s = filename[rdm2s_key][:]
+    rdm2s = np.array(rdm2s)
     return rdm2s
 
 
@@ -62,12 +53,7 @@ class _LASPDFT(_PDFT):
         return eri
 
     def multi_state(self, method='Lin'):
-        if method.upper() == "LIN":
-            from mrh.my_pyscf.mcpdft._lpdft import linear_multi_state
-            return linear_multi_state(self)
-        else:
-            raise NotImplementedError(f"StateAverageMix not available for {method}")
-
+        raise NotImplementedError(f"MS-PDFT not avaialble for the LAS wave functions.")
 
 def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
     mc_doc = (mc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
@@ -88,22 +74,12 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
         
         # Have to pass this due to dump_chk, which won't work for LAS.
         def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None, otxc=None,
-                                 grids_level=None, grids_attr=None, dunp_chk=False, **kwargs):
+                                 grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
             return _LASPDFT.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
                     grids_level=grids_level, grids_attr=grids_attr, dump_chk=False, **kwargs)
 
-        def multi_state(self, **kwargs):
-            """
-            In future will have to change this to consider the modal space selection, weights...
-            """
-            assert self.DoLASSI, "multi_state is only defined for post LAS methods"
-            return _LASPDFT.multi_state(self, **kwargs)
-
-        multi_state_mix = multi_state
-
         if DoLASSI:
             _mc_class.DoLASSI = True
-            _mc_class.rdmstmpfile = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
 
             def analyze(self, state=0, **kwargs):
                 log = lib.logger.new_logger(self, self.verbose)
@@ -153,26 +129,24 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
                 log.debug('_store_rdms: looping over %d states at a time of %d total', len(self.states),
                           nblk)
 
-                rdmstmpfile = self.rdmstmpfile
-                with h5py.File(rdmstmpfile, 'a') as f:
-                    for i in range(0, len(self.states), nblk):
-                        j = min(i + nblk, len(self.states))
+                for i in range(0, len(self.states), nblk):
+                    j = min(i + nblk, len(self.states))
 
-                        rdm1s, rdm2s = lassi.root_make_rdm12s(self, self.ci, self.si,
-                                                              state=self.states[i:j])
+                    rdm1s, rdm2s = lassi.root_make_rdm12s(self, self.ci, self.si,
+                                                          state=self.states[i:j])
 
-                        if len(self.states[i:j]) == 1:
-                            rdm1s = [rdm1s]
-                            rdm2s = [rdm2s]
+                    if len(self.states[i:j]) == 1:
+                        rdm1s = [rdm1s]
+                        rdm2s = [rdm2s]
 
-                        for k in range(i, j):
-                            stateno = self.states[k]
-                            rdm1s_dname = f'rdm1s_{stateno}'
-                            f.create_dataset(rdm1s_dname, data=rdm1s[k])
-                            rdm2s_dname = f'rdm2s_{stateno}'
-                            f.create_dataset(rdm2s_dname, data=rdm2s[k])
+                    for k in range(i, j):
+                        stateno = self.states[k]
+                        rdm1s_dname = f'rdm1s_{stateno}'
+                        self.rdmstmpfile.create_dataset(rdm1s_dname, data=rdm1s[k])
+                        rdm2s_dname = f'rdm2s_{stateno}'
+                        self.rdmstmpfile.create_dataset(rdm2s_dname, data=rdm2s[k])
 
-                        rdm1s = rdm2s = None
+                    rdm1s = rdm2s = None
 
             def make_one_casdm1s(self, ci=None, state=0, **kwargs):
                 rdmstmpfile = self.rdmstmpfile
@@ -204,6 +178,7 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
                     else:
                         self.fcisolver.nroots = len(self.states)
 
+                    self.rdmstmpfile = lib.H5TmpFile ()
                     self._store_rdms()
                 else:
                     self.e_mcscf, self.e_cas, self.ci, self.mo_coeff, self.mo_energy = \
@@ -212,6 +187,10 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
 
             if self.DoLASSI:
                 self.e_mcscf = self.e_roots[self.states]  # To be consistent with PySCF
+
+        def __del__(self):
+            if callable (getattr (self.rdmstmpfile, 'close', None)):
+                self.rdmstmpfile.close ()
 
     pdft = PDFT(mc._scf, mc.ncas_sub, mc.nelecas_sub, my_ot=ot, **kwargs)
     _keys = pdft._keys.copy()

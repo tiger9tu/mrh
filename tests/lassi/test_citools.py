@@ -8,11 +8,13 @@ from pyscf.scf.addons import canonical_orth_
 import itertools
 
 def setUpModule():
-    pass
+    global rng
+    rng = np.random.default_rng ()
 
 def tearDownModule():
-    pass
-
+    global rng
+    del rng
+    
 def case_umat_dot_1frag (ks, rng, nroots, nfrags, nvecs, lroots):
     nstates = np.prod (lroots, axis=0).sum ()
     if nvecs > nstates: return
@@ -50,13 +52,11 @@ def case_umat_dot_1frag (ks, rng, nroots, nfrags, nvecs, lroots):
 class KnownValues(unittest.TestCase):
 
     def test_umat_dot_1frag (self):
-        rng = np.random.default_rng ()
         nroots, nfrags, nvecs = tuple (rng.integers (1, high=6, size=3))
         for nroots, nfrags, nvecs in itertools.product (range (1,6), repeat=3):
             lroots = rng.integers (1, high=10, size=(nfrags,nroots))
             with self.subTest (nroots=nroots, nfrags=nfrags, nvecs=nvecs, lroots=lroots):
                 case_umat_dot_1frag (self, rng, nroots, nfrags, nvecs, lroots)
-
 
 if __name__ == "__main__":
     print("Full Tests for LASSI citools module functions")

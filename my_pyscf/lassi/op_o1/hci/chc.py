@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import linalg
 from pyscf import lib
-from pyscf.lib import logger
+from pyscf.lib import logger, param
 from pyscf.fci import cistring 
 from mrh.my_pyscf.lassi.op_o1 import stdm, frag, hams2ovlp, hsi, rdm
 from mrh.my_pyscf.lassi.op_o1.utilities import *
@@ -22,10 +22,10 @@ class ContractHamCI_CHC (stdm.LSTDM):
         h2 : ndarray of size ncas**4
             Contains 2-electron Hamiltonian amplitudes in second quantization
     '''
-    def __init__(self, las, ints, nlas, hopping_index, lroots, h0, h1, h2, mask_bra_space=None,
-                 mask_ket_space=None, pt_order=None, do_pt_order=None, log=None, max_memory=2000,
-                 dtype=np.float64):
-        hams2ovlp.HamS2Ovlp.__init__(self, ints, nlas, hopping_index, lroots, h1, h2,
+    def __init__(self, las, ints, nlas, lroots, h0, h1, h2, mask_bra_space=None,
+                 mask_ket_space=None, pt_order=None, do_pt_order=None, log=None,
+                 max_memory=param.MAX_MEMORY, dtype=np.float64):
+        hams2ovlp.HamS2Ovlp.__init__(self, ints, nlas, lroots, h1, h2,
                                      mask_bra_space = mask_bra_space,
                                      mask_ket_space = mask_ket_space,
                                      pt_order=pt_order, do_pt_order=do_pt_order,
@@ -41,7 +41,6 @@ class ContractHamCI_CHC (stdm.LSTDM):
 
     # Handling for 1s1c: need to do both a'.sm.b and b'.sp.a explicitly
     ltri = False
-    interaction_has_spin = ('_1c_', '_1c1d_', '_1s1c_', '_2c_')
 
     def _init_vecs (self):
         hci_fr_pabq = []
@@ -66,6 +65,8 @@ class ContractHamCI_CHC (stdm.LSTDM):
         self.dt_1d, self.dw_1d = 0.0, 0.0
         self.dt_2d, self.dw_2d = 0.0, 0.0
         self.dt_1c, self.dw_1c = 0.0, 0.0
+        self.dt_1c_td, self.dw_1c_td = 0.0, 0.0
+        self.dt_1c_h10, self.dw_1c_h10 = 0.0, 0.0
         self.dt_1c1d, self.dw_1c1d = 0.0, 0.0
         self.dt_1s, self.dw_1s = 0.0, 0.0
         self.dt_1s1c, self.dw_1s1c = 0.0, 0.0
@@ -83,6 +84,8 @@ class ContractHamCI_CHC (stdm.LSTDM):
         profile = fmt_str.format ('1d', self.dt_1d, self.dw_1d)
         profile += '\n' + fmt_str.format ('2d', self.dt_2d, self.dw_2d)
         profile += '\n' + fmt_str.format ('1c', self.dt_1c, self.dw_1c)
+        profile += '\n' + fmt_str.format ('1c_td', self.dt_1c_td, self.dw_1c_td)
+        profile += '\n' + fmt_str.format ('1c_h10', self.dt_1c_h10, self.dw_1c_h10)
         profile += '\n' + fmt_str.format ('1c1d', self.dt_1c1d, self.dw_1c1d)
         profile += '\n' + fmt_str.format ('1s', self.dt_1s, self.dw_1s)
         profile += '\n' + fmt_str.format ('1s1c', self.dt_1s1c, self.dw_1s1c)
@@ -142,7 +145,7 @@ class ContractHamCI_CHC (stdm.LSTDM):
         
         i.e.,
         
-        j ---s1---> i
+       j ---s1---> i
         '''
         t0, w0 = logger.process_clock (), logger.perf_counter ()
         hci_f_ab, iad, skip = self._get_vecs_(bra, ket, i, j)
@@ -156,20 +159,29 @@ class ContractHamCI_CHC (stdm.LSTDM):
         h1_ij = self.get_ham_2q (i,j)[s1]
         h2_ijjj = self.get_ham_2q (i,j,j,j)
         h2_iiij = self.get_ham_2q (i,i,i,j)
+
         if iad:
             D_j = self.ints[j].get_1_h (bra, ket, s1)
             D_jjj = self.ints[j].get_1_phh (bra, ket, s1).sum (0)
             h_10 = np.dot (h1_ij, D_j) + np.tensordot (h2_ijjj, D_jjj,
                 axes=((1,2,3),(2,0,1)))
             h_21 = np.dot (h2_iiij, D_j).transpose (2,0,1)
+            t1, w1 = logger.process_clock (), logger.perf_counter ()
+            self.dt_1c_td, self.dw_1c_td = self.dt_1c_td + t1 - t0, self.dw_1c_td + w1 - w0
             hci_f_ab[i] += fac * self.ints[i].contract_h10 (s1, h_10, h_21, ket)
+            t2, w2 = logger.process_clock (), logger.perf_counter ()
+            self.dt_1c_h10, self.dw_1c_h10 = self.dt_1c_h10 + t2 - t1, self.dw_1c_h10 + w2 - w1
         if jad:
             D_i = self.ints[i].get_1_p (bra, ket, s1)
             D_iii = self.ints[i].get_1_pph (bra, ket, s1).sum (0)
             h_01 = np.dot (D_i, h1_ij) + np.tensordot (D_iii, h2_iiij,
                 axes=((0,1,2),(2,0,1)))
             h_12 = np.tensordot (D_i, h2_ijjj, axes=1).transpose (1,2,0)
+            t1, w1 = logger.process_clock (), logger.perf_counter ()
+            self.dt_1c_td, self.dw_1c_td = self.dt_1c_td + t1 - t0, self.dw_1c_td + w1 - w0
             hci_f_ab[j] += fac * self.ints[j].contract_h01 (s1, h_01, h_12, ket)
+            t2, w2 = logger.process_clock (), logger.perf_counter ()
+            self.dt_1c_h10, self.dw_1c_h10 = self.dt_1c_h10 + t2 - t1, self.dw_1c_h10 + w2 - w1
         dt, dw = logger.process_clock () - t0, logger.perf_counter () - w0
         self.dt_1c, self.dw_1c = self.dt_1c + dt, self.dw_1c + dw
         self._put_vecs_(bra, ket, hci_f_ab, i, j)
@@ -454,7 +466,7 @@ class ContractHamCI_CHC (stdm.LSTDM):
             for ifrag in range (nfrags):
                 gen_hket = gen_contract_ham_ci_const (ifrag, las, h1, h2, ci, nelec_frs,
                                                       mask_bra_space=mask_bra_space,
-                                                      mask_ket_space=mask_ket_space)
+                                                      mask_ket_space=mask_ket_space, log=self.log)
                 for i, hket_pabq in enumerate (gen_hket):
                     hci[ifrag][i][:] += hci_dot_sivecs_ij (
                         hket_pabq, si_bra, si_ket, lroots_bra, ifrag, i
@@ -492,12 +504,14 @@ class ContractHamCI_CHC (stdm.LSTDM):
         self._crunch_all_()
         self._umat_linequiv_loop_()
         self._hconst_ci_()
+        self.log.info(self.sprint_profile())
         return self.hci_fr_pabq, t0
 
 def gen_contract_ham_ci_const (ifrag, las, h1, h2, ci, nelec_frs, soc=0, h0=0, orbsym=None,
-                               wfnsym=None, mask_bra_space=None, mask_ket_space=None):
+                               wfnsym=None, mask_bra_space=None, mask_ket_space=None, log=None):
     '''Constant-term parts of contract_ham_ci for fragment ifrag'''
-    log = lib.logger.new_logger (las, las.verbose)
+    if log is None:
+        log = lib.logger.new_logger (las, las.verbose)
     nlas = np.asarray (las.ncas_sub)
     nfrags, nroots = nelec_frs.shape[:2]
     dtype = ci[0][0].dtype
@@ -541,7 +555,8 @@ def gen_contract_ham_ci_const (ifrag, las, h1, h2, ci, nelec_frs, soc=0, h0=0, o
     # of the intermediate to keep track of the difference between the full-system indices and the
     # nfrag-1--system indices
     outerprod = hsi.gen_contract_op_si_hdiag (las, h1, h2, ci_jfrag, nelec_frs_j, nlas=nlas_j,
-                                              _HamS2Ovlp_class=HamS2Ovlp, _return_int=True)
+                                              _HamS2Ovlp_class=HamS2Ovlp, _return_int=True,
+                                              verbose=log.verbose)
     ham_op = outerprod.get_ham_op ()
     ovlp_op = outerprod.get_ovlp_op ()
 

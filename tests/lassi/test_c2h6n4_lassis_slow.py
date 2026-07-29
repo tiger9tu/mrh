@@ -40,6 +40,7 @@ def setUpModule ():
     las = LASSCF (mf, (4,4), ((2,2),(2,2)), spin_sub=(1,1))
     mo_coeff = las.localize_init_guess ((list (range (3)), list (range (9,12))))
     las.kernel (mo_coeff)
+    assert (las.converged)
     lsi = LASSIS (las).run (nroots_si=3)
 
 def tearDownModule():
@@ -71,7 +72,7 @@ class KnownValues(unittest.TestCase):
     def test_as_scanner (self):
         for dson in (False, True):
             with self.subTest (davidson_only=dson):
-                lsi_scanner = lsi.as_scanner ()
+                lsi_scanner = lsi.copy ().as_scanner ()
                 mol2 = struct (1.9, 1.9, '6-31g', symmetry=False)
                 mol2.verbose = 0
                 mol2.output = '/dev/null'

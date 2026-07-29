@@ -433,64 +433,6 @@ def get_ovlp (ci_fr, norb_f, nelec_frs, rootidx=None):
         ovlp[i,:] = dotter (ket, nelec_ket, iket=i, oporder=0)
     return ovlp
 
-def get_orth_basis (ci_fr, norb_f, nelec_frs, _get_ovlp=get_ovlp):
-    nfrags, nroots = nelec_frs.shape[:2]
-    unique, uniq_idx, inverse, cnts = np.unique (nelec_frs, axis=1, return_index=True,
-                                                 return_inverse=True, return_counts=True)
-    if not np.count_nonzero (cnts>1):
-        def raw2orth (rawarr):
-            return rawarr
-        def orth2raw (ortharr):
-            return ortharr
-        return raw2orth, orth2raw
-    lroots_fr = np.array ([[1 if c.ndim<3 else c.shape[0]
-                            for c in ci_r]
-                           for ci_r in ci_fr])
-    nprods_r = np.prod (lroots_fr, axis=0)
-    offs1 = np.cumsum (nprods_r)
-    offs0 = offs1 - nprods_r
-    uniq_prod_idx = []
-    for i in uniq_idx[cnts==1]: uniq_prod_idx.extend (list(range(offs0[i],offs1[i])))
-    manifolds_prod_idx = []
-    manifolds_xmat = []
-    nuniq_prod = north = len (uniq_prod_idx)
-    for manifold_idx in np.where (cnts>1)[0]:
-        manifold = np.where (inverse==manifold_idx)[0]
-        manifold_prod_idx = []
-        for i in manifold: manifold_prod_idx.extend (list(range(offs0[i],offs1[i])))
-        manifolds_prod_idx.append (manifold_prod_idx)
-        ovlp = _get_ovlp (ci_fr, norb_f, nelec_frs, rootidx=manifold)
-        xmat = canonical_orth_(ovlp, thr=LINDEP_THRESH)
-        north += xmat.shape[1]
-        manifolds_xmat.append (xmat)
-
-    nraw = offs1[-1]
-    def raw2orth (rawarr):
-        col_shape = rawarr.shape[1:]
-        orth_shape = [north,] + list (col_shape)
-        ortharr = np.zeros (orth_shape, dtype=rawarr.dtype)
-        ortharr[:nuniq_prod] = rawarr[uniq_prod_idx]
-        i = nuniq_prod
-        for prod_idx, xmat in zip (manifolds_prod_idx, manifolds_xmat):
-            j = i + xmat.shape[1]
-            ortharr[i:j] = np.tensordot (xmat.T, rawarr[prod_idx], axes=1)
-            i = j
-        return ortharr
-
-    def orth2raw (ortharr):
-        col_shape = ortharr.shape[1:]
-        raw_shape = [nraw,] + list (col_shape)
-        rawarr = np.zeros (raw_shape, dtype=ortharr.dtype)
-        rawarr[uniq_prod_idx] = ortharr[:nuniq_prod]
-        i = nuniq_prod
-        for prod_idx, xmat in zip (manifolds_prod_idx, manifolds_xmat):
-            j = i + xmat.shape[1]
-            rawarr[prod_idx] = np.tensordot (xmat.conj (), ortharr[i:j], axes=1)
-            i = j
-        return rawarr
-
-    return raw2orth, orth2raw
-
 def ham (las, h1, h2, ci_fr, nelec_frs, soc=0, orbsym=None, wfnsym=None, **kwargs):
     '''Build LAS state interaction Hamiltonian, S2, and ovlp matrices
 
@@ -591,12 +533,11 @@ def ham (las, h1, h2, ci_fr, nelec_frs, soc=0, orbsym=None, wfnsym=None, **kwarg
         ham_eff[i,:] = dotter (hket, nelec_ket, spinless2ss=spinless2ss, iket=i, oporder=2)
     
     _get_ovlp = functools.partial (get_ovlp, ci_fr, norb_f, nelec_frs)
-    #raw2orth = citools.get_orth_basis (ci_fr, norb_f, nelec_frs, _get_ovlp=_get_ovlp)
     return ham_eff, s2_eff, ovlp_eff, _get_ovlp #raw2orth
 
 def contract_ham_ci (las, h1, h2, ci_fr, nelec_frs, si_bra=None, si_ket=None, ci_fr_bra=None,
                      nelec_frs_bra=None, h0=0, soc=0, sum_bra=False, orbsym=None, wfnsym=None,
-                     **kwargs):
+                     add_transpose=False, accum=None, **kwargs):
     '''Evaluate the action of the state interaction Hamiltonian on a set of ket CI vectors,
     projected onto a basis of bra CI vectors, leaving one fragment of the bra uncontracted.
 
@@ -640,6 +581,19 @@ def contract_ham_ci (las, h1, h2, ci_fr, nelec_frs, si_bra=None, si_ket=None, ci
             Element i,j is an ndarray of shape (ndim_bra//ci_fr_bra[i][j].shape[0],
             ndeta_bra[i,j],ndetb_bra[i,j],ndim_ket). 
     '''
+    if add_transpose:
+        assert (ci_fr_bra is None)
+        assert (nelec_frs_bra is None)
+        hket_fr = contract_ham_ci (las, h1, h2, ci_fr, nelec_frs, si_bra=si_bra, si_ket=si_ket,
+                                   h0=h0, soc=soc, sum_bra=sum_bra, orbsym=orbsym, wfnsym=wfnsym,
+                                   add_transpose=False, **kwargs)
+        hketT_fr = contract_ham_ci (las, h1, h2, ci_fr, nelec_frs, si_bra=si_ket, si_ket=si_bra,
+                                    h0=h0, soc=soc, sum_bra=sum_bra, orbsym=orbsym, wfnsym=wfnsym,
+                                    add_transpose=False, **kwargs)
+        for f, hketT_r in enumerate (hketT_fr):
+            for r, hketT in enumerate (hketT_r):
+                hket_fr[f][r] += hketT
+        return hket_fr
     ci_fr_ket = ci_fr
     nelec_frs_ket = nelec_frs
     if ci_fr_bra is None: ci_fr_bra = ci_fr_ket
@@ -718,7 +672,7 @@ def contract_ham_ci (las, h1, h2, ci_fr, nelec_frs, si_bra=None, si_ket=None, ci
             hket_fr_pabq[ifrag][ibra] = np.stack (hket_fr_pabq[ifrag][ibra], axis=-1)
     return citools.hci_dot_sivecs (hket_fr_pabq, si_bra, si_ket, citools.get_lroots (ci_fr_bra))
 
-def make_stdm12s (las, ci_fr, nelec_frs, orbsym=None, wfnsym=None):
+def make_stdm12s (las, ci_fr, nelec_frs, orbsym=None, wfnsym=None, **kwargs):
     '''Build LAS state interaction transition density matrices
 
     Args:
@@ -1044,162 +998,17 @@ def roots_trans_rdm12s (las, ci_fr, nelec_frs, si_bra, si_ket, orbsym=None, wfns
         rdm2s.append (d2)
     return np.stack (rdm1s, axis=0), np.stack (rdm2s, axis=0)
 
-def _make_rdm3s_spinless_pair (ci_bra, ci_ket, norb, nelec_bra, nelec_ket):
-    '''Compute spin-separated transition 3-RDM for one pair of full-CAS CI vectors
-    using the spinless representation. This mirrors the approach used internally
-    by PySCF's make_rdm123s: map to spinless orbitals, call make_dm123 (which
-    supports bra != ket), reorder to normal ordering, then slice for spin components.
+def get_hdiag_orth (hdiag_raw, h_op_raw, raw2orth):
+    ham = h_op_raw.parent
+    ham = raw2orth (ham.T).T
+    ham = raw2orth (ham.conj ()).conj ()
+    return ham.diagonal ()
 
-    Args:
-        ci_bra : ndarray of shape (ndeta, ndetb)
-        ci_ket : ndarray of shape (ndeta, ndetb)
-        norb   : int, number of spatial active orbitals
-        nelec_bra : tuple (nalpha, nbeta)
-        nelec_ket : tuple (nalpha, nbeta)
-
-    Returns:
-        rdm3s : ndarray of shape (4, norb, norb, norb, norb, norb, norb)
-            Normal-ordered spin components [aaa, aab, abb, bbb].
-            After reorder_dm123, the index convention is:
-            rdm3s[s][p,s_,q,t,r,u] = <p+q+r+ u t s_>_{spin_s}
-    '''
-    from pyscf.fci.direct_spin1 import civec_spinless_repr
-    N_bra = sum (nelec_bra)
-    N_ket = sum (nelec_ket)
-    if N_bra != N_ket:
-        return np.zeros ((4,) + (norb,) * 6)
-    N = N_bra
-    # Map to spinless representation: alpha orbs 0..norb-1, beta norb..2*norb-1
-    ci_bra_sl = civec_spinless_repr ([ci_bra], norb, [nelec_bra])  # shape (1, ndets_sl)
-    ci_ket_sl = civec_spinless_repr ([ci_ket], norb, [nelec_ket])  # shape (1, ndets_sl)
-    # make_dm123 supports bra != ket and returns spin-free (spinless) 3-RDM
-    dm1_raw, dm2_raw, dm3_raw = fci.rdm.make_dm123 (
-        'FCI3pdm_kern_sf', ci_bra_sl, ci_ket_sl, 2 * norb, (N, 0))
-    # Normal-order: reorder_dm123 modifies arrays in-place by default
-    _, _, dm3 = fci.rdm.reorder_dm123 (dm1_raw, dm2_raw, dm3_raw)
-    # Extract spin components by slicing at norb boundary
-    n = norb
-    rdm3aaa = dm3[:n, :n, :n, :n, :n, :n]
-    rdm3aab = dm3[:n, :n, :n, :n, n:, n:]
-    rdm3abb = dm3[:n, :n, n:, n:, n:, n:]
-    rdm3bbb = dm3[n:, n:, n:, n:, n:, n:]
-    return np.stack ([rdm3aaa, rdm3aab, rdm3abb, rdm3bbb], axis=0)
-
-
-def root_make_rdm3s_planA (las, ci_fr, nelec_frs, si, ix, **kwargs):
-    '''Plan A (reference): build the full LASSI CI vector as a linear combination
-    of LAS outer-product states and call make_dm123 once.
-
-    Args:
-        las      : instance of class LASSCF
-        ci_fr    : nested list of shape (nfrags, nroots)
-        nelec_frs: ndarray of shape (nfrags, nroots, 2)
-        si       : ndarray of shape (nprods, nroots_si)
-        ix       : int, index of LASSI eigenstate
-
-    Returns:
-        rdm3s : ndarray of shape (4, ncas, ncas, ncas, ncas, ncas, ncas)
-            Normal-ordered spin components [aaa, aab, abb, bbb]
-    '''
-    from pyscf.fci.direct_spin1 import civec_spinless_repr
-    norb_f = las.ncas_sub
-    norb = sum (norb_f)
-
-    ci_r, nelec_r = ci_outer_product (ci_fr, norb_f, nelec_frs)
-    nelec_r_spinless = [(n[0] + n[1], 0) for n in nelec_r]
-    if len (set (nelec_r_spinless)) != 1:
-        raise NotImplementedError ('States with different particle numbers')
-
-    nelec = nelec_r[0]
-    N = sum (nelec)
-    ndeta = cistring.num_strings (norb, nelec[0])
-    ndetb = cistring.num_strings (norb, nelec[1])
-    nprods = len (nelec_r)
-
-    # Build LASSI CI vector as weighted sum of outer-product LAS states
-    dtype = np.result_type (si.dtype, ci_fr[-1][0].dtype)
-    ci_lsi = np.zeros ((ndeta, ndetb), dtype=dtype)
-    for coeff, ci_las in zip (si[:nprods, ix], ci_r):
-        ci_lsi += coeff * ci_las
-
-    # Spinless representation -> make_dm123 (same trick used by make_rdm123s)
-    ci_sl = civec_spinless_repr ([ci_lsi], norb, [nelec])
-    dm1_raw, dm2_raw, dm3_raw = fci.rdm.make_dm123 (
-        'FCI3pdm_kern_sf', ci_sl, ci_sl, 2 * norb, (N, 0))
-    _, _, dm3 = fci.rdm.reorder_dm123 (dm1_raw, dm2_raw, dm3_raw)
-
-    n = norb
-    rdm3aaa = dm3[:n, :n, :n, :n, :n, :n].copy ()
-    rdm3aab = dm3[:n, :n, :n, :n, n:, n:].copy ()
-    rdm3abb = dm3[:n, :n, n:, n:, n:, n:].copy ()
-    rdm3bbb = dm3[n:, n:, n:, n:, n:, n:].copy ()
-    return np.stack ([rdm3aaa, rdm3aab, rdm3abb, rdm3bbb], axis=0)
-
-
-def root_make_rdm3s (las, ci_fr, nelec_frs, si, ix, **kwargs):
-    '''Plan B: compute spin-separated 3-RDM for one LASSI eigenstate as a weighted
-    sum over all pairs of LAS states:
-
-        Gamma3 = sum_{i,j} si[i,ix].conj() * si[j,ix] * <las_i| p+q+r+ stu |las_j>
-
-    Diagonal (i==j) and off-diagonal (i!=j) transition 3-RDMs are both computed
-    via _make_rdm3s_spinless_pair, which uses fci.rdm.make_dm123 (supports bra!=ket).
-
-    Args:
-        las      : instance of class LASSCF
-        ci_fr    : nested list of shape (nfrags, nroots)
-        nelec_frs: ndarray of shape (nfrags, nroots, 2)
-        si       : ndarray of shape (nprods, nroots_si)
-        ix       : int, index of LASSI eigenstate
-
-    Returns:
-        rdm3s : ndarray of shape (4, ncas, ncas, ncas, ncas, ncas, ncas)
-            Normal-ordered spin components [aaa, aab, abb, bbb]
-    '''
-    norb_f = las.ncas_sub
-    norb = sum (norb_f)
-
-    ci_r, nelec_r = ci_outer_product (ci_fr, norb_f, nelec_frs)
-    nelec_r_spinless = [(n[0] + n[1], 0) for n in nelec_r]
-    if len (set (nelec_r_spinless)) != 1:
-        raise NotImplementedError ('States with different particle numbers')
-
-    nprods = len (nelec_r)
-    coeffs = si[:nprods, ix]
-
-    rdm3s = np.zeros ((4,) + (norb,) * 6)
-    for i in range (nprods):
-        for j in range (nprods):
-            w = coeffs[i].conj () * coeffs[j]
-            if abs (w) < 1e-14:
-                continue
-            if nelec_r[i] != nelec_r[j]:
-                continue  # different spin sectors: zero contribution
-            dm3s_ij = _make_rdm3s_spinless_pair (
-                ci_r[i], ci_r[j], norb, nelec_r[i], nelec_r[j])
-            rdm3s += w * dm3s_ij
-
-    return rdm3s.real if np.isrealobj (si) else rdm3s
-
-
-def roots_make_rdm3s (las, ci_fr, nelec_frs, si, **kwargs):
-    '''Compute spin-separated 3-RDMs for all LASSI eigenstates (Plan B).
-
-    Args:
-        las      : instance of class LASSCF
-        ci_fr    : nested list of shape (nfrags, nroots)
-        nelec_frs: ndarray of shape (nfrags, nroots, 2)
-        si       : ndarray of shape (nprods, nroots_si)
-
-    Returns:
-        rdm3s : ndarray of shape (nroots_si, 4, ncas, ncas, ncas, ncas, ncas, ncas)
-    '''
-    nroots_si = si.shape[1]
-    result = []
-    for ix in range (nroots_si):
-        result.append (root_make_rdm3s (las, ci_fr, nelec_frs, si, ix, **kwargs))
-    return np.stack (result, axis=0)
-
+def pspace_ham (h_op_raw, raw2orth, addrs):
+    ham = h_op_raw.parent
+    ham = raw2orth (ham.T).T
+    ham = raw2orth (ham.conj ()).conj ()
+    return ham[addrs,:][:,addrs]
 
 if __name__ == '__main__':
     from pyscf import scf, lib

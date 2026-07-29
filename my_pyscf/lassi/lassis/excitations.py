@@ -3,7 +3,8 @@ import numpy as np
 import ctypes
 import itertools
 from scipy import linalg
-from pyscf.lib import logger
+from pyscf.lib import logger, param
+from pyscf.fci import cistring
 from pyscf.fci.direct_spin1 import _unpack_nelec, trans_rdm1s, trans_rdm12s
 from pyscf.scf.addons import canonical_orth_
 from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver, state_average_fcisolver
@@ -16,29 +17,35 @@ from pyscf import __config__
 op = (op_o0, op_o1)
 
 LOWEST_REFOVLP_EIGVAL_THRESH = getattr (__config__, 'lassi_excitations_refovlp_eigval_thresh', 1e-9)
-IMAG_SHIFT = getattr (__config__, 'lassi_excitations_imag_shift', 1e-6)
-MAX_CYCLE_E0 = getattr (__config__, 'lassi_excitations_max_cycle_e0', 1)
-CONV_TOL_E0 = getattr (__config__, 'lassi_excitations_conv_tol_e0', 1e-8)
+MAX_CYCLE = getattr (__config__, 'lassi_excitations_max_cycle', 50)
+CONV_TOL_SPACE = getattr (__config__, 'lassi_excitations_conv_tol_space', 1e-4)
+CONV_TOL_SELF = getattr (__config__, 'lassi_excitations_conv_tol_self', 1e-8)
 
 def lowest_refovlp_eigpair (ham_pq, p=1, ovlp_thresh=LOWEST_REFOVLP_EIGVAL_THRESH, log=None):
     ''' Identify the lowest-energy eigenpair for which the eigenvector has nonzero overlap with
-    the first p basis functions. '''
+    the reference wave function. '''
     e_all, u_all = linalg.eigh (ham_pq)
     w_pp = (u_all[:p,:].conj () * u_all[:p,:]).sum (0) / p
     w_q0q0 = u_all[p,:].conj () * u_all[p,:]
     w_pq0 = np.abs (u_all[:p,:].conj () * u_all[p,:][None,:]).sum (0)
-    idx_valid = w_q0q0 > 0.1
+    for i in range (8):
+        idx_valid = w_q0q0 > 10**-(i+1)
+        if np.count_nonzero (idx_valid) > 0:
+            break
+    if np.count_nonzero (idx_valid) == 0:
+        log.error ("weights of the reference wfn: %s", str (w_q0q0))
+        raise RuntimeError ("No eigenstate w/ w>1e-8 reference wfn detected")
     e_valid = e_all[idx_valid]
     u_valid = u_all[:,idx_valid]
     idx_choice = np.argmin (e_valid)
     if log is not None and log.verbose > logger.DEBUG:
-        log.debug2 ("Debugging eigenpair selection")
-        log.debug2 (" idx e w_pp w_q0q0 w_pq0")
+        log.debug1 ("Debugging eigenpair selection")
+        log.debug1 (" idx e w_pp w_q0q0 w_pq0")
         i0 = np.where (idx_valid)[0][idx_choice]
         for i in range (len (e_all)):
             line = ' {} {} {} {} {}'.format (i,e_all[i],w_pp[i],w_q0q0[i],w_pq0[i])
             if i==i0: line += ' selected'
-            log.debug2 (line)
+            log.debug1 (line)
     return e_valid[idx_choice], u_valid[:,idx_choice]
 
 def lowest_refovlp_eigval (ham_pq, p=1, ovlp_thresh=LOWEST_REFOVLP_EIGVAL_THRESH):
@@ -58,17 +65,27 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
     |ref(i)> = A prod_K |ci(ref(i))_K>
     |exc> = A prod_{K in excited} |ci(exc)_K> prod_{K not in excited} |ci(ref(0))_K>
 
-    with {ci(ref(i))_K} fixed.'''
+    with {ci(ref(i))_K} fixed.
+
+    Convergence attributes:
+        conv_tol_space : float
+            Stationarity of the state space
+        conv_tol_self : float
+            Stationarity of the energy
+        max_cycle : integer
+            Maximum number of cycles
+    '''
 
     def __init__(self, solvers_ref, ci_ref, norb_ref, nelec_ref, orbsym_ref=None,
                  wfnsym_ref=None, stdout=None, verbose=0, opt=0, ref_weights=None, 
-                 crash_locmin=False, **kwargs):
+                 crash_locmin=False, max_memory=param.MAX_MEMORY, **kwargs):
         if isinstance (solvers_ref, ProductStateFCISolver):
             solvers_ref = [solvers_ref]
             ci_ref = [[c] for c in ci_ref]
         if ref_weights is None:
             ref_weights = [0.0,]*len (solvers_ref)
             ref_weights[0] = 1.0
+        self.max_memory = max_memory
         self.solvers_ref = solvers_ref
         self.ci_ref = ci_ref
         self.ref_weights = np.asarray (ref_weights)
@@ -78,6 +95,10 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         self.wfnsym_ref = wfnsym_ref
         self.crash_locmin = crash_locmin
         self.opt = opt
+        self._linkstr_cache = {}
+        self.conv_tol_space = CONV_TOL_SPACE
+        self.conv_tol_self = CONV_TOL_SELF
+        self.max_cycle = MAX_CYCLE
         ProductStateFCISolver.__init__(self, solvers_ref[0].fcisolvers, stdout=stdout,
                                        verbose=verbose)
         ci_ref_rf = [[c[i] for c in ci_ref] for i in range (len (self.solvers_ref))]
@@ -91,6 +112,17 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         self.fcisolvers = []
         self._e_q = []
         self._si_q = []
+
+    def dump_flags (self, verbose=None):
+        if verbose is None: verbose = self.verbose
+        log = logger.new_logger (self, verbose)
+        log.info ('******** %s ********', self.__class__)
+        log.info ('max_cycle = %d', self.max_cycle)
+        log.info ('conv_tol_space = %7.1e', self.conv_tol_space)
+        log.info ('conv_tol_self = %7.1e', self.conv_tol_self)
+        log.info ('opt = %d', self.opt)
+        log.info ('max_memory %d MB', self.max_memory)
+        return self
 
     def get_excited_orb_idx (self):
         nj = np.cumsum (self.norb_ref)
@@ -185,8 +217,11 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         return delta
 
     def kernel (self, h1, h2, ecore=0, ci0=None,
-                conv_tol_space=1e-4, conv_tol_self=1e-6, max_cycle_macro=50,
-                serialfrag=False, nroots=1, **kwargs):
+                conv_tol_space=None, conv_tol_self=None, max_cycle=None,
+                nroots=1, **kwargs):
+        if conv_tol_space is None: conv_tol_space = self.conv_tol_space
+        if conv_tol_self is None: conv_tol_self = self.conv_tol_self
+        if max_cycle is None: max_cycle = self.max_cycle
         t0 = lib.logger.process_clock (), lib.logger.perf_counter ()
         h0, h1, h2 = self.get_excited_h (ecore, h1, h2)
         log = self.log
@@ -196,51 +231,53 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         if orbsym is not None:
             idx = self.get_excited_orb_idx ()
             orbsym = [orbsym[iorb] for iorb in range (norb_tot) if idx[iorb]]
+        log.info (("ExcitationPSFCISolver is optimizing %d P-space states factorized across "
+                   "%d fragments with %d fixed Q-space states"),
+                  nroots, len (norb_f), self.get_nq ())
         ci0 = self.get_init_guess (ci0, norb_f, nelec_f, h1, h2, nroots=3*nroots)
         ham_pq = self.get_ham_pq (h0, h1, h2, ci0)
         e, si = self.eig1 (ham_pq, ci0)
         disc_svals, u, si_p, si_q, vh = self.schmidt_trunc (si, ci0, nroots=nroots)
         ham_pq = self.truncrot_ham_pq (ham_pq, u, vh)
         ci1 = self.truncrot_ci (ci0, u, vh)
-        hci_qspace = self.op_ham_pq_ref (h1, h2, ci1)
         hci_pspace_diag = self.op_ham_pp_diag (h1, h2, ci1, norb_f, nelec_f)
         tdm1s_f = self.get_tdm1s_f (ci1, ci1, norb_f, nelec_f)
-        e, si0_p = 0, si_p
+        e, eprime, eprime_last, si0_p = 0, 0, 0, si_p
         disc_sval_max = max (list(disc_svals)+[0.0,])
         converged = False
         log.info ('Entering product-state fixed-point CI iteration')
-        for it in range (max_cycle_macro):
+        for it in range (max_cycle):
             e_last = e
             space_delta = self.space_delta (ci0, si0_p, ci1, si_p, nroots)
             ci0, si0_p = ci1, si_p
             # Re-diagonalize in truncated space
             e, si = self.eig1 (ham_pq, ci0)
             _, u, si_p, si_q, vh = self.schmidt_trunc (si, ci0, nroots=nroots)
+
             log.debug ('Singular values in truncated space: {}'.format (si_p))
             ci1 = self.truncrot_ci (ci0, u, vh)
-            log.info ('Cycle %d: |delta space| = %e ; e = %e, |delta e| = %e, max (discarded) = %e',
-                      it, space_delta, e, e - e_last, disc_sval_max)
+            log.info (("Cycle %d: |delta space| = %e ; e = %e, de = %e, e' = %e, de' = %e, "
+                       "max (discarded) = %e"),
+                      it, space_delta, e, e - e_last, eprime, eprime - eprime_last, disc_sval_max)
             if ((space_delta < conv_tol_space) and (abs (e-e_last) < conv_tol_self)):
                 converged = True
                 break
             ham_pq = self.truncrot_ham_pq (ham_pq, u, vh)
-            hci_qspace = self.truncrot_hci_qspace (hci_qspace, u, vh)
             hci_pspace_diag = self.truncrot_hci_pspace_diag (hci_pspace_diag, u, vh)
             tdm1s_f = self.truncrot_tdm1s_f (tdm1s_f, u, vh)
             # Generate additional vectors and compute gradient
-            hpq_xq = self.get_hpq_xq (hci_qspace, ci1, si_q)
+            hci_qspace = self.op_ham_pq_ref (h1, h2, ci1, si_q)
+            hpq_xq = self.get_hpq_xq (hci_qspace, ci1)
             hpp_xp = self.get_hpp_xp (ci1, si_p, hci_pspace_diag, h0, h2, tdm1s_f, norb_f, nelec_f)
             grad = self._get_grad (ci1, si_p, hpq_xq, hpp_xp, nroots=nroots)
             ci2 = self.get_new_vecs (ci1, hpq_xq, hpp_xp, nroots=nroots)
             # Extend intermediates
-            hci2_qspace = self.op_ham_pq_ref (h1, h2, ci2)
             hci2_pspace_diag = self.op_ham_pp_diag (h1, h2, ci2, norb_f, nelec_f)
             tdm1s_f_12 = self.get_tdm1s_f (ci1, ci2, norb_f, nelec_f)
             tdm1s_f_21 = self.get_tdm1s_f (ci2, ci1, norb_f, nelec_f)
             tdm1s_f_22 = self.get_tdm1s_f (ci2, ci2, norb_f, nelec_f)
             for ifrag in range (len (ci1)):
                 ci1[ifrag] = np.append (ci1[ifrag], ci2[ifrag], axis=0)
-                hci_qspace[ifrag] = np.append (hci_qspace[ifrag], hci2_qspace[ifrag], axis=0)
                 hci_pspace_diag[ifrag] = np.append (hci_pspace_diag[ifrag], hci2_pspace_diag[ifrag], axis=0)
                 tdm1s_f[ifrag] = np.append (
                     np.append (tdm1s_f[ifrag], tdm1s_f_12[ifrag], axis=1),
@@ -250,11 +287,11 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
             ham_pq = self.update_ham_pq (ham_pq, h0, h1, h2, ci1, hci_qspace, hci_pspace_diag,
                                          tdm1s_f, norb_f, nelec_f)
             # Diagonalize and truncate
-            _, si = self.eig1 (ham_pq, ci1)
+            eprime_last = eprime
+            eprime, si = self.eig1 (ham_pq, ci1)
             disc_svals, u, si_p, si_q, vh = self.schmidt_trunc (si, ci1, nroots=nroots)
             ham_pq = self.truncrot_ham_pq (ham_pq, u, vh)
             ci1 = self.truncrot_ci (ci1, u, vh)
-            hci_qspace = self.truncrot_hci_qspace (hci_qspace, u, vh)
             hci_pspace_diag = self.truncrot_hci_pspace_diag (hci_pspace_diag, u, vh)
             tdm1s_f = self.truncrot_tdm1s_f (tdm1s_f, u, vh)
             log.debug ('Retained singular values: {}'.format (si_p))
@@ -273,13 +310,14 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         for ifrag, c in zip (self.excited_frags, ci1_active):
             ci1[ifrag] = np.asarray (c)
         t1 = self.log.timer ('ExcitationPSFCISolver kernel', *t0)
+        self._linkstr_cache = {} # Finalize
         return converged, energy_elec, ci1, disc_sval_max
 
     def get_nq (self):
         lroots = get_lroots ([self.ci_ref[ifrag] for ifrag in self.excited_frags])
         return np.prod (lroots, axis=0).sum ()
 
-    def get_ham_pq (self, h0, h1, h2, ci_p):
+    def get_ham_pq (self, h0, h1, h2, ci_p, _offdiag_only=False):
         '''Build the model-space Hamiltonian matrix for the current state of the P-space.
 
         Args:
@@ -310,12 +348,27 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         nelec_fs_p = np.asarray ([list(self._get_nelec (s, n)) 
                                    for s, n in zip (fcisolvers, nelec_ref)])
         nelec_frs = np.append (nelec_fs_p[:,None,:], nelec_frs_q, axis=1)
+        if _offdiag_only:
+            mask_ket_space = np.atleast_1d ([0,]).astype (int)
+            mask_bra_space = np.arange (1, nelec_frs.shape[1], dtype=int)
+        else:
+            mask_bra_space = mask_ket_space = None
         with temporary_env (self, ncas_sub=norb_ref, mol=fcisolvers[0].mol):
             ham_pq, _, ovlp_pq = op[self.opt].ham (self, h1, h2, ci_fr, nelec_frs, soc=0,
                                                    orbsym=self.orbsym_ref,
-                                                   wfnsym=self.wfnsym_ref)[:3]
-        t1 = self.log.timer ('get_ham_pq', *t0)
-        return ham_pq + (h0*ovlp_pq)
+                                                   wfnsym=self.wfnsym_ref, verbose=0,
+                                                   mask_bra_space=mask_bra_space,
+                                                   mask_ket_space=mask_ket_space)[:3]
+        ham_pq += h0*ovlp_pq
+        if _offdiag_only:
+            p = np.prod (get_lroots (ci_p))
+            ham_pq[p:] = 0
+            ham_pq[:,:p] = 0
+            ham_pq += ham_pq.conj ().T
+        else:
+            # This will be part of update_ham_pq timer if _offdiag_only
+            t1 = self.log.timer ('get_ham_pq', *t0)
+        return ham_pq
 
     def update_ham_pq (self, ham_pq, h0, h1, h2, ci, hci_qspace, hci_pspace_diag, tdm1s_f,
                        norb_f, nelec_f):
@@ -354,7 +407,6 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         '''
         #ref = self.get_ham_pq (h0, h1, h2, ci)
         t0 = lib.logger.process_clock (), lib.logger.perf_counter ()
-        #return ref
         nfrags = len (ci)
         assert (nfrags == 2)
         old_ham_pq = ham_pq
@@ -368,14 +420,22 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         #assert (np.amax (np.abs (ham_pq[p:,p:] - ref[p:,p:])) < 1e-6)
 
         # p,q sector
-        h_pq = lib.einsum (
-            'iab,jabq->ijq', ci[1].conj (), hci_qspace[1],
-        )
-        h_pq = h_pq.reshape (lroots[1]*lroots[0],q)
-        ham_pq[:p,p:] = h_pq
-        #assert (np.amax (np.abs (ham_pq[:p,p:] - ref[:p,p:])) < 1e-6)
-        ham_pq[p:,:p] = h_pq.conj ().T
-        #assert (np.amax (np.abs (ham_pq[p:,:p] - ref[p:,:p])) < 1e-6)
+        h_pq = self.get_ham_pq (h0, h1, h2, ci, _offdiag_only=True)
+        ham_pq += h_pq
+        #try:
+        #    assert (np.amax (np.abs (ham_pq[:p,p:] - ref[:p,p:])) < 1e-6), '{}-{}={}'.format (
+        #        lib.fp (ham_pq[:p,p:]), lib.fp (ref[:p,p:]), lib.fp (ham_pq[:p,p:])-lib.fp (ref[:p,p:]))
+        #except AssertionError as err:
+        #    idx = np.argmax (np.abs (ham_pq[:p,p:]-ref[:p,p:]))
+        #    print (lroots, idx, ham_pq[:p,p:].flat[idx], ref[:p,p:].flat[idx], (ham_pq[:p,p:]-ref[:p,p:]).flat[idx])
+        #    raise (err)
+        #try:
+        #    assert (np.amax (np.abs (ham_pq[p:,:p] - ref[p:,:p])) < 1e-6), '{}-{}={}'.format (
+        #        lib.fp (ham_pq[p:,:p]), lib.fp (ref[p:,:p]), lib.fp (ham_pq[p:,:p])-lib.fp (ref[p:,:p]))
+        #except AssertionError as err:
+        #    idx = np.argmax (np.abs (ham_pq[p:,:p]-ref[p:,:p]))
+        #    print (lroots, idx, ham_pq[p:,:p].flat[idx], ref[p:,:p].flat[idx], (ham_pq[p:,:p]-ref[p:,:p]).flat[idx])
+        #    raise (err)
 
         # p,p sector - constant
         h_pp = np.zeros ((p,p), dtype=ham_pq.dtype)
@@ -419,7 +479,7 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         t1 = self.log.timer ('update_ham_pq', *t0)
         return ham_pq
 
-    def op_ham_pq_ref (self, h1, h2, ci):
+    def op_ham_pq_ref (self, h1, h2, ci, si_q):
         '''Act the Hamiltonian on the reference CI vectors and project onto the current
         ground state of all but one active fragment, for each active fragment.
 
@@ -430,14 +490,19 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
                 2-electron part of the excited-fragment Hamiltonian
             ci: list of ndarray of shape (p,ndeta[i],ndetb[i])
                 CI vectors of the active fragments in the P-space
+            si_q: ndarray of shape (nq,)
+                Q-space part of the SI vector
 
         Returns:
-            hci_f_pabq: list of ndarray of shape (p,ndeta[i],ndetb[i],q)
-                Contains H|q>, projected onto <p| for all but one fragment, for each fragment.
-                Vectors are multiplied by the sqrt of the weight of p.'''
+            hci_f_pab: list of ndarray of shape (p,ndeta[i],ndetb[i])
+                Contains H|q><q|SI>, projected onto <p| for all but one fragment, for each
+                fragment. Vectors are multiplied by the sqrt of the weight of p.'''
         # TODO: point group symmetry
         t0 = lib.logger.process_clock (), lib.logger.perf_counter ()
+        t00 = lib.logger.process_clock (), lib.logger.perf_counter ()
         lroots = get_lroots (ci)
+        assert (np.all (lroots>0))
+        assert (lroots[0]==lroots[1])
         nfrags = len (lroots)
         ci = [c.copy () for c in ci]
         # ZERO-STATE CLUDGE
@@ -450,28 +515,36 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         nelec_f = np.asarray ([self.nelec_ref[ifrag] for ifrag in excited_frags])
         ci_fr_ket = [self.ci_ref[ifrag] for ifrag in excited_frags]
         nelec_frs_ket = np.zeros ((len (excited_frags), len (self.solvers_ref), 2), dtype=int)
+        t01 = self.log.timer ('zero state cludge part 1', *t00)
         for iq, solver_ref in enumerate (self.solvers_ref):
             fcisolvers = [solver_ref.fcisolvers[ifrag] for ifrag in excited_frags]
             for ifrag, (s, n) in enumerate (zip (fcisolvers, nelec_f)):
                 nelec_frs_ket[ifrag,iq,:] = self._get_nelec (s, n)
+        t02 = self.log.timer ('first loop', *t01)
         ci_fr_bra = [[np.asarray (c)] for c in ci]
         nelec_rfs_bra = np.asarray ([[list(self._get_nelec (s, n))
                                      for s, n in zip (self.fcisolvers, nelec_f)]])
         nelec_frs_bra = nelec_rfs_bra.transpose (1,0,2)
+        t03 = self.log.timer ('more throat clearing', *t02)
         h_op = op[self.opt].contract_ham_ci
+        t04 = self.log.timer ('contract_ham_ci', *t03)
         with temporary_env (self, ncas_sub=norb_f, mol=self.fcisolvers[0].mol):
-            hci_fr_pabq = h_op (self, h1, h2, ci_fr_ket, nelec_frs_ket, ci_fr_bra=ci_fr_bra,
-                                nelec_frs_bra=nelec_frs_bra, soc=0, orbsym=None, wfnsym=None)
-        hci_f_pabq = [hc[0] for hc in hci_fr_pabq]
+            hci_fr_pab = h_op (self, h1, h2, ci_fr_ket, nelec_frs_ket, ci_fr_bra=ci_fr_bra,
+                               si_ket=si_q,
+                               nelec_frs_bra=nelec_frs_bra, soc=0, orbsym=None, wfnsym=None,
+                               verbose=0)
+        t05 = self.log.timer ('doing h_op', *t04)
+        hci_f_pab = [hc[0] for hc in hci_fr_pab]
         # ZERO-STATE CLUDGE
         for ifrag in range (nfrags):
             if lroots[ifrag]!=0: continue
             for jfrag in range (nfrags):
                 if ifrag==jfrag: continue
-                hci = hci_f_pabq[jfrag]
-                hci_f_pabq[jfrag] = np.zeros ([0,]+list(hci.shape[1:]), dtype=hci.dtype)
+                hci = hci_f_pab[jfrag]
+                hci_f_pab[jfrag] = np.zeros ([0,]+list(hci.shape[1:]), dtype=hci.dtype)
+        t06 = self.log.timer ('last part of op_ham_pq_ref', *t05)
         t1 = self.log.timer ('op_ham_pq_ref', *t0)
-        return hci_f_pabq
+        return hci_f_pab
 
     def op_ham_pp_diag (self, h1, h2, ci, norb_f, nelec_f):
         ''' Act Hfrag[i]|ci[i]> for all fragments i 
@@ -544,18 +617,29 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         for ifrag in range (nfrags):
             solver = self.fcisolvers[ifrag]
             norb, nelec = norb_f[ifrag], self._get_nelec (solver, nelec_f[ifrag])
+            linkstr = self._get_linkstr_tdm1s_f_(ifrag, norb, nelec)
             nbra, nket = lroots_bra[ifrag], lroots_ket[ifrag]
             tdm1s = np.zeros ((nbra, nket, 2, norb, norb))
             b = cibra[ifrag]
             k = ciket[ifrag]
             for i, j in itertools.product (range (nbra), range (nket)):
-                tdm1s[i,j,0], tdm1s[i,j,1] = trans_rdm1s (b[i], k[j], norb, nelec)
+                tdm1s[i,j,0], tdm1s[i,j,1] = trans_rdm1s (b[i], k[j], norb, nelec,
+                                                          link_index=linkstr)
                 tdm1s[i,j,0] = tdm1s[i,j,0].T
                 tdm1s[i,j,1] = tdm1s[i,j,1].T
             assert (tdm1s.ndim==5)
             tdm1s_f.append (tdm1s)
         t1 = self.log.timer ('get_tdm1s_f', *t0)
         return tdm1s_f
+
+    def _get_linkstr_tdm1s_f_(self, ifrag, norb, nelec):
+        linkstr = self._linkstr_cache.get ((ifrag,norb,nelec), None)
+        if linkstr is None:
+            la = cistring.gen_linkstr_index (range (norb), nelec[0])
+            lb = cistring.gen_linkstr_index (range (norb), nelec[1])
+            linkstr = (la,lb)
+            self._linkstr_cache[(ifrag,norb,nelec)] = linkstr
+        return linkstr
 
     def eig1 (self, ham_pq, ci0, ovlp_thresh=1e-3):
         '''Diagonalize the coupled Hamiltonian for the lowest-energy eigensolution with substantial
@@ -624,6 +708,8 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         vh = vh[:nroots,:]
         si_p = svals
         si_q = si[p:]
+        self.log.debug1 ('[svals retained], [svals discarded] = %s , %s',
+                         str (svals), str (disc_svals))
         return disc_svals, u, si_p, si_q, vh
 
     def truncrot_ci (self, ci0, u, vh):
@@ -665,33 +751,30 @@ class ExcitationPSFCISolver (ProductStateFCISolver):
         tdm1s_f1[1] = lib.einsum ('um,uvsij,vn->mnsij', u, tdm1s_f0[1], u.conj ())
         return tdm1s_f1
 
-    def get_hpq_xq (self, hci_f_pabq, ci0, si_q):
+    def get_hpq_xq (self, hci0_f_pab, ci0):
         '''Generate the P-row, Q-column part of the Hamiltonian-vector product projected into P'
 
         Args:
-            hci_f_pabq: list of ndarrays of shape (nroots,ndeta[i],ndetb[i],q)
-                H|q> projected on <p0| for all but one fragment, where <p0| is the first few
+            hci0_f_pab: list of ndarrays of shape (nroots,ndeta[i],ndetb[i])
+                H|q><q|SI> projected on <p0| for all but one fragment, where <p0| is the first few
                 vectors of CI, i.e., the output of op_ham_pq_ref for ci0.
             ci0: list of ndarrays of shape (nroots,ndeta[i],ndetb[i])
                 CI vectors of the p-space
-            si_q: ndarray of shape (nq,)
-                Q-space part of the SI vector
 
         Returns:
-            hci_f_pab: list of ndarrays of shape (nroots,ndeta[i],ndetb[i])
+            hci1_f_pab: list of ndarrays of shape (nroots,ndeta[i],ndetb[i])
                 Hamiltonian-vector product component, projected orthogonal to ci0
         '''
         t0 = lib.logger.process_clock (), lib.logger.perf_counter ()
         lroots = get_lroots (ci0)
         p = np.prod (lroots)
-        hci_f_pab = []
-        for ci, hci_pabq in zip (ci0, hci_f_pabq):
-            hci_pab = np.dot (hci_pabq, si_q)
+        hci1_f_pab = []
+        for ci, hci_pab in zip (ci0, hci0_f_pab):
             hci_pr = np.tensordot (hci_pab, ci.conj (), axes=((1,2),(1,2)))
             hci_pab -= np.tensordot (hci_pr, ci, axes=1)
-            hci_f_pab.append (hci_pab)
+            hci1_f_pab.append (hci_pab)
         t1 = self.log.timer ('get_hpq_xq', *t0)
-        return hci_f_pab
+        return hci1_f_pab
 
     def get_hpp_xp (self, ci0, si_p, hci_pspace_diag, h0, h2, tdm1s_f, norb_f, nelec_f):
         '''Generate the P-row, P-column part of the Hamiltonian-vector product projected into P'

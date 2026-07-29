@@ -4,12 +4,13 @@ from scipy import linalg
 from pyscf import gto, scf, lib, mcscf
 from pyscf.fci.direct_spin1 import _unpack_nelec
 from mrh.tests.lasscf.c2h6n4_struct import structure as struct
+from mrh.tests.lassi.addons import case_contract_op_si
 from mrh.my_pyscf.fci import csf_solver
 from mrh.my_pyscf.lassi import dms as lassi_dms
 from mrh.my_pyscf.mcscf.soc_int import compute_hso, amfi_dm
 from mrh.my_pyscf.lassi.op_o0 import ci_outer_product
 from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF
-from mrh.my_pyscf.lassi.lassi import make_stdm12s, roots_make_rdm12s, ham_2q
+from mrh.my_pyscf.lassi.lassi import make_stdm12s, roots_make_rdm12s, roots_trans_rdm12s, ham_2q
 from mrh.my_pyscf import lassi
 import itertools
 
@@ -19,13 +20,14 @@ def setUpModule():
     from mrh.my_pyscf.lassi.op_o1 import frag
     oldvars['SCREEN_THRESH'] = frag.SCREEN_THRESH
     frag.SCREEN_THRESH = 1e-32
+    lib.logger.TIMER_LEVEL = lib.logger.DEBUG2
     mol1 = gto.M (atom="""
         O  0.000000  0.000000  0.000000
         H  0.758602  0.000000  0.504284
         H  -0.758602  0.000000  0.504284
     """, basis='631g',symmetry=True,
-    output='/dev/null', #'test_soc1.log',
-    verbose=0) #lib.logger.DEBUG)
+    output='test_soc1.log',
+    verbose=lib.logger.DEBUG)
     mf1 = scf.RHF (mol1).run ()
    
     # NOTE: Test systems don't have to be scientifically meaningful, but they do need to
@@ -77,7 +79,7 @@ def case_soc_stdm12s_slow (self, opt=0):
         self.assertAlmostEqual (np.amax(np.abs(dm1s_test[:,:8,8:])), 0)
     dm2_test = lib.einsum ('iabcdi->iabcd', stdm2s_test.sum ((1,4)))
     e0, h1, h2 = ham_2q (las2, las2.mo_coeff, soc=True)
-    e1 = lib.einsum ('pq,iqp->i', h1, dm1s_test)
+    e1 = lib.einsum ('pq,ipq->i', h1, dm1s_test)
     e2 = lib.einsum ('pqrs,ipqrs->i', h2, dm2_test) * .5
     e_test = e0 + e1 + e2
     with self.subTest (sanity='spin-free total energies'):
@@ -132,13 +134,25 @@ def case_soc_stdm12s_slow (self, opt=0):
                 self.assertAlmostEqual (lib.fp (t_test), lib.fp (t_ref), 9)
 
 def case_soc_rdm12s_slow (self, opt=0):
+    # trans part
+    si_ket = lsi2.si
+    si_bra = np.roll (lsi2.si, 1, axis=1)
+    rdm1s_test, rdm2s_test = roots_trans_rdm12s (las2, las2.ci, si_bra, si_ket, opt=opt)
+    stdm1s, stdm2s = make_stdm12s (las2, soc=True, opt=opt)    
+    rdm1s_ref = lib.einsum ('ir,jr,iabj->rab', si_bra.conj (), si_ket, stdm1s)
+    rdm2s_ref = lib.einsum ('ir,jr,jsabtcdi->rsabtcd', si_ket.conj (), si_bra, stdm2s)
+    with self.subTest (sanity='dm1s trans'):
+        self.assertAlmostEqual (lib.fp (rdm1s_test), lib.fp (rdm1s_ref), 10)
+    with self.subTest (sanity='dm2s trans'):
+        self.assertAlmostEqual (lib.fp (rdm2s_test), lib.fp (rdm2s_ref), 10)
+    # cis part
     rdm1s_test, rdm2s_test = roots_make_rdm12s (las2, las2.ci, lsi2.si, opt=opt)
     stdm1s, stdm2s = make_stdm12s (las2, soc=True, opt=opt)    
-    rdm1s_ref = lib.einsum ('ir,jr,jabi->rab', lsi2.si.conj (), lsi2.si, stdm1s)
-    rdm2s_ref = lib.einsum ('ir,jr,isabtcdj->rsabtcd', lsi2.si.conj (), lsi2.si, stdm2s)
-    with self.subTest (sanity='dm1s'):
+    rdm1s_ref = lib.einsum ('ir,jr,iabj->rab', lsi2.si.conj (), lsi2.si, stdm1s)
+    rdm2s_ref = lib.einsum ('ir,jr,jsabtcdi->rsabtcd', lsi2.si.conj (), lsi2.si, stdm2s)
+    with self.subTest (sanity='dm1s cis'):
         self.assertAlmostEqual (lib.fp (rdm1s_test), lib.fp (rdm1s_ref), 10)
-    with self.subTest (sanity='dm2s'):
+    with self.subTest (sanity='dm2s cis'):
         self.assertAlmostEqual (lib.fp (rdm2s_test), lib.fp (rdm2s_ref), 10)
     # Stationary test has the issue of two doubly-degenerate manifolds: 1,2 and 4,5.
     # Therefore their RDMs actually vary randomly. Average the second and third RDMs
@@ -154,8 +168,7 @@ def case_soc_rdm12s_slow (self, opt=0):
     with lib.light_speed (5):
         e0, h1, h2 = ham_2q (las2, las2.mo_coeff, soc=True)
     rdm2_test = rdm2s_test.sum ((1,4))
-    # NOTE: dumbass PySCF 1-RDM convention that ket is first
-    e1 = lib.einsum ('pq,iqp->i', h1, rdm1s_test)
+    e1 = lib.einsum ('pq,ipq->i', h1, rdm1s_test)
     e2 = lib.einsum ('pqrs,ipqrs->i', h2, rdm2_test) * .5
     e_test = e0 + e1 + e2 - las2.e_states[0]
     e_ref = lsi2.e_roots - las2.e_states[0]
@@ -194,7 +207,25 @@ class KnownValues (unittest.TestCase):
         hso_ref[6,2] = -10524.501 + 0j # T(-1)
         hso_ref[5,0] =  0 - 18916.659j # T(0) < testing both this and T(+-1) is the reason I did 2 triplets
         
-        las = LASSCF (mf1, (6,), (8,), spin_sub=(1,), wfnsym_sub=('A1',)).run (conv_tol_grad=1e-7)
+        las = LASSCF (mf1, (6,), (8,), spin_sub=(1,), wfnsym_sub=('A1',))#.run (conv_tol_grad=1e-7)
+        las.lasci ()
+        ugg = las.get_ugg ()
+        print (ugg.nvar_orb)
+        H_op = las.get_hop ()
+        Hdiag = H_op._get_Hdiag ()
+        Hdiag_ref = np.zeros_like (Hdiag)
+        x = np.zeros_like (Hdiag)
+        for i in range (len (Hdiag)):
+            x[:] = 0
+            x[i] = 1
+            Hdiag_ref[i] = H_op (x)[i]
+        np.save ('Hdiag_test.npy', Hdiag)
+        np.save ('Hdiag_ref.npy', Hdiag_ref)
+        with self.subTest ('Hdiag'):
+            self.assertAlmostEqual (lib.fp (Hdiag[:ugg.nvar_orb]), lib.fp (Hdiag_ref[:ugg.nvar_orb]), 7)
+        self.assertTrue (las.converged)
+        las.run (conv_tol_grad=1e-7, max_cycle_macro=300)
+        self.assertTrue (las.converged)
         las.state_average_(weights=[1,0,0,0,0,0,0],
                            spins=[[0,],[2,],[0,],[-2,],[2,],[0,],[-2,],],
                            smults=[[1,],[3,],[3,],[3,],[3,],[3,],[3,],],
@@ -206,52 +237,55 @@ class KnownValues (unittest.TestCase):
             esf_test = las.e_states - e0
             self.assertAlmostEqual (lib.fp (esf_test), lib.fp (esf_ref), 6)
         ham = [None, None]
-        for opt in (0,1):
-            with lib.light_speed (10):
-                e_roots, si = las.lassi (opt=opt, soc=True, break_symmetry=True)
-                h0, h1, h2 = ham_2q (las, las.mo_coeff, soc=True)
-            ham[opt] = (si * e_roots[None,:]) @ si.conj ().T
-            eso_test = e_roots - e0
-            with self.subTest (opt=opt, deltaE='SO'):
-                self.assertAlmostEqual (lib.fp (eso_test), lib.fp (eso_ref), 6)
-            from pyscf.data import nist
-            au2cm = nist.HARTREE2J / nist.PLANCK / nist.LIGHT_SPEED_SI * 1e-2
-            def test_hso (hso_test, tag='kernel'):
-                hso_test *= au2cm
-                hso_test = np.around (hso_test, 8)
-                # Align relative signs: 0 - 1,3,5 block (all imaginary; vide supra)
-                for i in (1,3,5):
-                    if np.sign (hso_test.imag[i,0]) != np.sign (hso_ref.imag[i,0]):
-                        hso_test[i,:] *= -1
-                        hso_test[:,i] *= -1
-                # Align relative signs: 2 - 4,6 block (all real; vide supra)
-                for i in (4,6):
-                    if np.sign (hso_test.real[i,2]) != np.sign (hso_ref.real[i,2]):
-                        hso_test[i,:] *= -1
-                        hso_test[:,i] *= -1
-                for i, j in zip (*np.where (hso_ref)):
-                    with self.subTest (tag, opt=opt, hso=(i,j)):
-                        try:
-                            self.assertAlmostEqual (hso_test[i,j],hso_ref[i,j],1)
-                        except AssertionError as e:
-                            if abs (hso_test[i,j]+hso_ref[i,j]) < 0.05:
-                                raise AssertionError ("Sign fix failed for element",i,j)
-                            raise (e)
-                        # NOTE: 0.1 cm-1 -> 0.5 * 10^-6 au. These are actually tight checks.
-            test_hso ((si * eso_test[None,:]) @ si.conj ().T)
-            stdm1s, stdm2s = make_stdm12s (las, soc=True, break_symmetry=True, opt=opt)
-            stdm2 = stdm2s.sum ((1,4))
-            e0eff = h0 - e0
-            h0eff = np.eye (7) * e0eff
-            h1eff = lib.einsum ('pq,iqpj->ij', h1, stdm1s)
-            h2eff = lib.einsum ('pqrs,ipqrsj->ij', h2, stdm2) * .5
-            test_hso (h0eff + h1eff + h2eff, 'make_stdm12s')
-            rdm1s, rdm2s = roots_make_rdm12s (las, las.ci, si, soc=True, break_symmetry=True,
-                                              opt=opt)
-            rdm2 = rdm2s.sum ((1,4))
-            e1eff = lib.einsum ('pq,iqp->i', h1, rdm1s)
-            e2eff = lib.einsum ('pqrs,ipqrs->i', h2, rdm2) * .5
-            test_hso ((si * (e0eff+e1eff+e2eff)[None,:]) @ si.conj ().T, 'roots_make_rdm12s')
+        for dson in (False, True):
+            for opt in (0,1):
+                with lib.light_speed (10):
+                    lsi = lassi.LASSI (las).run (opt=opt, soc=True, break_symmetry=True,
+                                                 davidson_only=dson, nroots_si=7)
+                    e_roots, si = lsi.e_roots, lsi.si
+                    h0, h1, h2 = ham_2q (las, las.mo_coeff, soc=True)
+                ham[opt] = (si * e_roots[None,:]) @ si.conj ().T
+                eso_test = e_roots - e0
+                with self.subTest (opt=opt, davidson_only=dson, deltaE='SO'):
+                    self.assertAlmostEqual (lib.fp (eso_test), lib.fp (eso_ref), 6)
+                from pyscf.data import nist
+                au2cm = nist.HARTREE2J / nist.PLANCK / nist.LIGHT_SPEED_SI * 1e-2
+                def test_hso (hso_test, tag='kernel'):
+                    hso_test *= au2cm
+                    hso_test = np.around (hso_test, 8)
+                    # Align relative signs: 0 - 1,3,5 block (all imaginary; vide supra)
+                    for i in (1,3,5):
+                        if np.sign (hso_test.imag[i,0]) != np.sign (hso_ref.imag[i,0]):
+                            hso_test[i,:] *= -1
+                            hso_test[:,i] *= -1
+                    # Align relative signs: 2 - 4,6 block (all real; vide supra)
+                    for i in (4,6):
+                        if np.sign (hso_test.real[i,2]) != np.sign (hso_ref.real[i,2]):
+                            hso_test[i,:] *= -1
+                            hso_test[:,i] *= -1
+                    for i, j in zip (*np.where (hso_ref)):
+                        with self.subTest (tag, opt=opt, davidson_only=dson, hso=(i,j)):
+                            try:
+                                self.assertAlmostEqual (hso_test[i,j],hso_ref[i,j],1)
+                            except AssertionError as e:
+                                if abs (hso_test[i,j]+hso_ref[i,j]) < 0.05:
+                                    raise AssertionError ("Sign fix failed for element",i,j)
+                                raise (e)
+                            # NOTE: 0.1 cm-1 -> 0.5 * 10^-6 au. These are actually tight checks.
+                test_hso ((si * eso_test[None,:]) @ si.conj ().T)
+                stdm1s, stdm2s = make_stdm12s (las, soc=True, break_symmetry=True, opt=opt)
+                stdm2 = stdm2s.sum ((1,4))
+                e0eff = h0 - e0
+                h0eff = np.eye (7) * e0eff
+                h1eff = lib.einsum ('pq,ipqj->ij', h1, stdm1s)
+                h2eff = lib.einsum ('pqrs,ipqrsj->ij', h2, stdm2) * .5
+                test_hso (h0eff + h1eff + h2eff, 'make_stdm12s')
+                rdm1s, rdm2s = roots_make_rdm12s (las, las.ci, si, soc=True, break_symmetry=True,
+                                                  opt=opt)
+                rdm2 = rdm2s.sum ((1,4))
+                e1eff = lib.einsum ('pq,ipq->i', h1, rdm1s)
+                e2eff = lib.einsum ('pqrs,ipqrs->i', h2, rdm2) * .5
+                test_hso ((si * (e0eff+e1eff+e2eff)[None,:]) @ si.conj ().T, 'roots_make_rdm12s')
         with self.subTest ('o0-o1 ham agreement'):
             self.assertAlmostEqual (lib.fp (ham[0]), lib.fp (ham[1]), 8)
 
@@ -261,20 +295,28 @@ class KnownValues (unittest.TestCase):
             self.assertAlmostEqual (lib.fp (lsi2._las.e_states), -214.8686632658775, 8)
         with self.subTest (opt=0, deltaE='SO'):
             self.assertAlmostEqual (lib.fp (lsi2.e_roots), -214.8684319949548, 8)
-        lsi = lassi.LASSI (lsi2._las, soc=True, break_symmetry=True, opt=1)
-        with lib.light_speed (5): lsi.kernel (opt=1)
-        with self.subTest (opt=1, deltaE='SO'):
-            self.assertAlmostEqual (lib.fp (lsi.e_roots), -214.8684319949548, 8)
-        with self.subTest ('hamiltonian', opt=1):
-            ham_o0 = (lsi2.si * lsi2.e_roots[None,:]) @ lsi2.si.conj ().T
-            ham_o1 = (lsi.si * lsi.e_roots[None,:]) @ lsi.si.conj ().T
-            self.assertAlmostEqual (lib.fp (ham_o1), lib.fp (ham_o0), 8)
+        for dson in (False, True):
+            lsi = lassi.LASSI (lsi2._las, soc=True, break_symmetry=True, opt=1)
+            lsi = lsi.set (davidson_only=dson, nroots_si=lsi2._las.nroots)
+            with lib.light_speed (5):
+                lsi.kernel (opt=1)
+                if dson:
+                    h0, h1, h2 = ham_2q (lsi2._las, lsi2.mo_coeff, soc=True)
+                    case_contract_op_si (self, lsi, h1, h2, lsi.ci, lsi.get_nelec_frs (),
+                                         smult_fr=lsi.get_smult_fr (), soc=True,#)#, tol=4)
+                                         disc_fr=lsi.get_disc_fr ())
+            with self.subTest (opt=1, davidson_only=dson, deltaE='SO'):
+                self.assertAlmostEqual (lib.fp (lsi.e_roots), -214.8684319949548, 8)
+            with self.subTest ('hamiltonian', opt=1, davidson_only=dson):
+                ham_o0 = (lsi2.si * lsi2.e_roots[None,:]) @ lsi2.si.conj ().T
+                ham_o1 = (lsi.si * lsi.e_roots[None,:]) @ lsi.si.conj ().T
+                self.assertAlmostEqual (lib.fp (ham_o1), lib.fp (ham_o0), 8)
 
     def test_soc_stdm12s_slow_o0 (self):
         case_soc_stdm12s_slow (self, opt=0)
 
     def test_soc_stdm12s_slow_o1 (self):
-        #case_soc_stdm12s_slow (self, opt=1)
+        case_soc_stdm12s_slow (self, opt=1)
         d_test = make_stdm12s (las2, soc=True, opt=1)
         d_ref = make_stdm12s (las2, soc=True, opt=0)
         for i,j in itertools.product (range (len (d_test[0])), repeat=2): 
@@ -287,7 +329,7 @@ class KnownValues (unittest.TestCase):
         case_soc_rdm12s_slow (self, opt=0)
 
     def test_soc_rdm12s_slow_o1 (self):
-        #case_soc_rdm12s_slow (self, opt=1)
+        case_soc_rdm12s_slow (self, opt=1)
         d_test = roots_make_rdm12s (las2, las2.ci, lsi2.si, opt=1)
         d_ref = roots_make_rdm12s (las2, las2.ci, lsi2.si, opt=0)
         for i in range (len (d_test[0])):

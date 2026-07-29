@@ -8,6 +8,7 @@ from pyscf.lo.orth import vec_lowdin
 from mrh.my_pyscf.fci import csf_solver
 from mrh.my_pyscf.fci.csfstring import CSFTransformer
 from mrh.my_pyscf.fci.spin_op import contract_sdown, contract_sup, mdown, mup
+from mrh.my_pyscf.fci.spin_op import norm_sdown, norm_sup
 from mrh.my_pyscf.mcscf.lasci import get_space_info
 from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver
 from mrh.my_pyscf.lassi.lassis.excitations import ExcitationPSFCISolver
@@ -16,6 +17,7 @@ from mrh.my_pyscf.lassi.spaces import _spin_shuffle, list_spaces
 from mrh.my_pyscf.lassi.spaces import all_single_excitations
 from mrh.my_pyscf.lassi.spaces import orthogonal_excitations, combine_orthogonal_excitations
 from mrh.my_pyscf.lassi.lassi import LASSI
+from mrh.my_pyscf.lassi.lassis import chkfile
 
 # TODO: split prepare_states into three steps
 # 1. Compute the number of unique fragment CI vectors to be computed (including sz-flips but not
@@ -28,9 +30,13 @@ from mrh.my_pyscf.lassi.lassi import LASSI
 
 def prepare_model_states (lsi, ci_ref, ci_sf, ci_ch):
     t0 = (logger.process_clock (), logger.perf_counter ())
+    t1 = (logger.process_clock (), logger.perf_counter ())
     log = logger.new_logger (lsi, lsi.verbose)
     las = lsi.get_las_of_ci_ref (ci_ref)
+    t1=log.timer ("LASSIS model space preparation: get_las_of_ci_ref ", *t1)
     space0 = list_spaces (las)[0]
+    if not space0.civecs_have_good_spin ():
+        log.warn ("spin-impure reference wfn in LASSIS")
     # Make spin flip objects
     spin_flips = []
     for i in range (las.nfrags):
@@ -46,20 +52,29 @@ def prepare_model_states (lsi, ci_ref, ci_sf, ci_ch):
             smults1.append (smult+2)
             spins1.append (smult+1)
             ci1.append (ci_sf[i][1])
-        spin_flips.append (SpinFlips (ci1, space0.nlas[i], space0.nelec[i], spins1, smults1))
+        spin_flip_i = SpinFlips (las.mol, ci1, space0.nlas[i], space0.nelec[i], spins1, smults1)
+        spin_flips.append (spin_flip_i)
+    t1=log.timer ("LASSIS model space preparation: make spin flip objects ", *t1)
+    
     # Make charge-hop objects
     spaces = [space0]
+    spaces_ch = [[[] for a in range (lsi.nfrags)] for i in range (lsi.nfrags)]
     for i, a in itertools.product (range (lsi.nfrags), repeat=2):
         for s in range (4):
             ci_i, ci_a = ci_ch[i][a][s]
             if ci_i is None or ci_a is None: continue
             dsi = -1 + (s//2)*2
             dsa = -1 + (s%2)*2
-            spaces.append (space0.get_single_any_m (i, a, dsi, dsa, ci_i=ci_i, ci_a=ci_a))
+            space_ias = space0.get_single_any_m (i, a, dsi, dsa, ci_i=ci_i, ci_a=ci_a)
+            spaces.append (space_ias)
+            spaces_ch[i][a].append (space_ias)
+    t1=log.timer ("LASSIS model space preparation: make charge-hop objects ", *t1)
     # Excitation products and spin-shuffling
     if lsi.nfrags > 3:
-        spaces = charge_excitation_products (lsi, spaces, nroots_ref=1)
+        spaces = charge_excitation_products (lsi, spaces,spaces_ch, nroots_ref=1)
+    t1=log.timer ("LASSIS model space preparation: make charge excitation products ", *t1)
     spaces = spin_flip_products (las, spaces, spin_flips, nroots_ref=1)
+    t1=log.timer ("LASSIS model space preparation: make spin flip products ", *t1)
     # Throat-clear
     weights = [space.weight for space in spaces]
     charges = [space.charges for space in spaces]
@@ -69,7 +84,18 @@ def prepare_model_states (lsi, ci_ref, ci_sf, ci_ch):
     entmaps = [space.entmap for space in spaces]
     las = las.state_average (weights=weights, charges=charges, spins=spins, smults=smults, assert_no_dupes=False)
     las.ci = ci
-    las.lasci (_dry_run=True)
+    t1=log.timer ("LASSIS model space preparation: throat clearing ", *t1)
+    for ifrag in range (lsi.nfrags):
+        for iroot in range (las.nroots):
+            t = spaces[iroot].fcisolvers[ifrag].transformer
+            nelec = (spaces[iroot].neleca[ifrag], spaces[iroot].nelecb[ifrag])
+            norb = spaces[iroot].nlas[ifrag]
+            spin = spaces[iroot].spins[ifrag]
+            las.fciboxes[ifrag].fcisolvers[iroot].transformer = t
+            las.fciboxes[ifrag].fcisolvers[iroot].nelec = nelec
+            las.fciboxes[ifrag].fcisolvers[iroot].norb = norb
+            las.fciboxes[ifrag].fcisolvers[iroot].spin = spin
+        t1=log.timer ("LASSIS model space preparation: fci for fragments ", *t1)
     log.timer ("LASSIS model space preparation", *t0)
     return las, entmaps
 
@@ -95,7 +121,7 @@ def prepare_fbf (lsi, ci_ref, ci_sf, ci_ch, ncharge=1, nspin=0, sa_heff=True,
     las1.e_states = las1.energy_nuc () + np.array (las1.states_energy_elec ())
     # 3. Charge excitations
     if ncharge:
-        las2 = all_single_excitations (las1)
+        las2 = all_single_excitations (las1, filter_shuffles=True, mask=lsi.mask_charge_hops)
         conv_ch, ci_ch, max_disc_sval = single_excitations_ci (
             lsi, las2, las1, ci_ch, ncharge=ncharge, sa_heff=sa_heff,
             deactivate_vrv=deactivate_vrv, spin_flips=spin_flips, crash_locmin=crash_locmin,
@@ -104,82 +130,11 @@ def prepare_fbf (lsi, ci_ref, ci_sf, ci_ch, ncharge=1, nspin=0, sa_heff=True,
     log.timer ("LASSIS fragment basis functions preparation", *t0)
     return conv_sf and conv_ch, ci_sf, ci_ch, max_disc_sval
 
-def filter_single_excitation_spin_shuffles (lsi, spaces, nroots_ref=1):
-    spaces_ref = spaces[:nroots_ref]
-    spaces = spaces[nroots_ref:]
-    space0 = spaces_ref[0]
-
-    manifolds = []
-    for space in spaces:
-        isnew = True
-        for manifold in manifolds:
-            if space.is_spin_shuffle_of (manifold[0]):
-                manifold.append (space)
-                isnew = False
-                break
-        if isnew:
-            manifold = [space,]
-            manifolds.append (manifold)
-
-    spaces = [select_single_excitation_from_spin_manifold (lsi, space0, manifold)
-              for manifold in manifolds]
-    return spaces_ref + spaces
-
-def select_single_excitation_from_spin_manifold (lsi, space0, manifold):
-    log = lib.logger.new_logger (lsi)
-    nelec0 = space0.nelec
-    smults0 = space0.smults
-    spins0 = space0.spins
-    nelec1 = manifold[0].nelec
-    smults1 = manifold[0].smults
-    ifrag = np.where ((nelec1-nelec0)==-1)[0][0]
-    afrag = np.where ((nelec1-nelec0)==1)[0][0]
-    spins1 = np.abs (spins0.copy ())
-    target_sign = np.sign (spins0)
-    if (spins0[ifrag] == 0) and (spins0[afrag] == 0):
-        # arbitrarily preference alpha-electron hopping
-        target_sign[ifrag] = -1
-        target_sign[afrag] = 1
-    elif spins0[ifrag] == 0:
-        # set preference by receiving fragment
-        target_sign[ifrag] = -target_sign[afrag]
-    elif spins0[afrag] == 0:
-        # set preference by donating fragment
-        target_sign[afrag] = -target_sign[ifrag]
-    spins1[ifrag] += smults1[ifrag]-smults0[ifrag]
-    spins1[afrag] += smults1[afrag]-smults0[afrag]
-    spins1 = target_sign * spins1
-    assert (np.all (np.abs (spins1) < smults1))
-    spins = np.stack ([space.spins for space in manifold], axis=0)
-    dspins = np.abs (spins - spins1[None,:])
-    # Sort by smults; first for environment, then for active frags
-    sorter = smults1.copy ()
-    offset = np.amax (sorter)
-    sorter[ifrag] += offset
-    sorter[afrag] += offset
-    if sorter[ifrag] == sorter[afrag]:
-        sorter[afrag] += 1
-    idx = np.argsort (sorter, kind='stable')
-    dspins = dspins[:,idx]
-    dimsize = dspins.shape[0] * np.amax (dspins, axis=0)
-    dimsize = np.cumprod (dimsize[::-1]+1)[::-1]
-    scores = np.dot (dimsize, dspins.T)
-    # debrief
-    logstr = 'excitation {}->{}\nnelec_ref: {}\nsmults_ref: {}\nsmults_exc: {}\n'.format (
-        ifrag, afrag, nelec0, smults0, smults1)
-    logstr += 'ref spins: {}\ntarget spins: {}\n'.format (spins0, spins1)
-    for i, space in enumerate (manifold):
-        logstr += 'candidate spins: {}, score: {}\n'.format (space.spins, scores[i])
-    log.debug (logstr)
-    idx = (scores == np.amin (scores))
-    manifold = [space for i, space in enumerate (manifold) if idx[i]]
-    if len (manifold) > 1: raise RuntimeError (logstr)
-    return manifold[0]
-
 def single_excitations_ci (lsi, las2, las1, ci_ch, ncharge=1, sa_heff=True, deactivate_vrv=False,
                            spin_flips=None, crash_locmin=False, ham_2q=None):
     log = logger.new_logger (lsi, lsi.verbose)
     mol = lsi.mol
+    max_memory = getattr (lsi, 'max_memory', mol.max_memory)
     nfrags = lsi.nfrags
     e_roots = np.append (las1.e_states, np.zeros (las2.nroots-las1.nroots))
     spaces = list_spaces (las2)
@@ -200,7 +155,6 @@ def single_excitations_ci (lsi, las2, las1, ci_ch, ncharge=1, sa_heff=True, deac
         h0, h1, h2 = ham_2q
     t0 = (logger.process_clock (), logger.perf_counter ())
     converged = True
-    spaces = filter_single_excitation_spin_shuffles (lsi, spaces, nroots_ref=las1.nroots)
     keys = set ()
     max_max_disc = 0
     for i in range (las1.nroots, len (spaces)):
@@ -245,7 +199,9 @@ def single_excitations_ci (lsi, las2, las1, ci_ch, ncharge=1, sa_heff=True, deac
         psref = [space.get_product_state_solver () for space in psref]
         psexc = ExcitationPSFCISolver (psref, ciref, las2.ncas_sub, las2.nelecas_sub,
                                        stdout=mol.stdout, verbose=mol.verbose,
-                                       crash_locmin=crash_locmin, opt=lsi.opt)
+                                       crash_locmin=crash_locmin, opt=lsi.opt,
+                                       max_memory=getattr (lsi, 'max_memory',
+                                                           mol.max_memory))
         psexc._deactivate_vrv = deactivate_vrv
         norb = spaces[i].nlas
         neleca = spaces[i].neleca
@@ -265,9 +221,16 @@ def single_excitations_ci (lsi, las2, las1, ci_ch, ncharge=1, sa_heff=True, deac
             ci0[1] = mdown (ci0[1], norb_a, nelec_a, smult_a)
             if lroots[afrag,i] == 1 and ci0[1].ndim==3: ci0[1] = ci0[1][0]
         ci0 = [ci0[int (afrag<ifrag)], ci0[int (ifrag<afrag)]]
+        attr = {key: val for key, val in lsi.cisolver_attr_charge_hops.items ()}
+        # Backwards compatibility with older ways of setting these convergence parameters
+        if 'max_cycle' not in attr.keys () and lsi.max_cycle_macro is not None:
+            attr['max_cycle'] = lsi.max_cycle_macro
+        if 'conv_tol_self' not in attr.keys () and lsi.conv_tol_self is not None:
+            attr['conv_tol_self'] = lsi.conv_tol_self
+        psexc.__dict__.update (attr)
+        psexc.dump_flags ()
         conv, e_roots[i], ci1, disc_svals_max = psexc.kernel (
-            h1, h2, ecore=h0, ci0=ci0, max_cycle_macro=lsi.max_cycle_macro,
-            conv_tol_self=lsi.conv_tol_self, nroots=ncharge_i
+            h1, h2, ecore=h0, ci0=ci0, nroots=ncharge_i
         )
         ci_ch_ias[0] = mup (ci1[ifrag], norb_i, nelec_i, smult_i)
         if lroots[ifrag,i]==1 and ci_ch_ias[0].ndim == 2:
@@ -289,7 +252,8 @@ class SpinFlips (object):
     '''For a single fragment, bundle the ci vectors of various spin-flipped states with their
        corresponding quantum numbers. Instances of this object are stored together in a list
        where position indicates fragment identity.'''
-    def __init__(self, ci, norb, nelec, spins, smults):
+    def __init__(self, mol, ci, norb, nelec, spins, smults):
+        self.mol = mol
         self.norb = norb
         self.nelec = nelec
         self.ci = ci
@@ -303,18 +267,30 @@ class SpinFlips (object):
                 nelecb = (self.nelec - (smult-1)) // 2
                 ci_list = list (ci)
                 for ms in range (smult-1):
-                    ci_list = [contract_sdown (c, norb, (neleca,nelecb)) for c in ci_list]
+                    ci_list = [contract_sdown (c, norb, (neleca,nelecb))
+                               / norm_sdown (smult, (neleca,nelecb))
+                               for c in ci_list]
                     neleca -= 1
                     nelecb += 1
                     self.ci.append (np.array (ci_list))
                     self.smults.append (smult)
                     self.spins.append (neleca-nelecb)
-
-
+        self.fcisolvers = []
+        for i in range (len (self.ci)):
+            solver = csf_solver (self.mol, smult=self.smults[i])
+            neleca = (self.nelec + self.spins[i]) // 2
+            nelecb = (self.nelec - self.spins[i]) // 2
+            solver.norb = self.norb
+            solver.nelec = (neleca,nelecb)
+            solver.spin = self.spins[i]
+            solver.check_transformer_cache ()
+            self.fcisolvers.append (solver)
+        assert (len (self.ci) == len (self.fcisolvers))
 
 def all_spin_flips (lsi, las, ci_sf, nspin=1, ham_2q=None):
     # NOTE: this actually only uses the -first- rootspace in las, so it can be done before
     # the initial spin shuffle
+    t0 = (logger.process_clock (), logger.perf_counter ())
     log = logger.new_logger (lsi, lsi.verbose)
     norb_f = las.ncas_sub
     spaces = list_spaces (las)
@@ -354,15 +330,23 @@ def all_spin_flips (lsi, las, ci_sf, nspin=1, ham_2q=None):
             neleca = (nelec + m2) // 2
             nelecb = (nelec - m2) // 2
             solver = csf_solver (las.mol, smult=sm).set (nelec=(neleca,nelecb), norb=norb)
+            solver.verbose = lsi.verbose
+            solver.stdout = lsi.stdout
+            solver.__dict__.update (lsi.cisolver_attr_spin_flips)
+            solver.dump_flags ()
             solver.check_transformer_cache ()
             nroots = min (nroots, solver.transformer.ncsf)
-            ci_list = solver.kernel (h1_i, h2_i, norb, (neleca,nelecb), ci0=ci0, nroots=nroots)[1]
-            if nroots==1: ci_list = [ci_list,]
+            e_list, ci_list = solver.kernel (h1_i, h2_i, norb, (neleca,nelecb), ci0=ci0, nroots=nroots)[:2]
+            if nroots==1:
+                e_list = [e_list,]
+                ci_list = [ci_list,]
+            e_arr = np.atleast_1d (e_list)
             ci_arr = np.array ([mup (c, norb, (neleca,nelecb), sm) for c in ci_list])
-            return np.all (solver.converged), ci_arr
+            return np.all (solver.converged), e_arr, ci_arr
         smults1_i = []
         spins1_i = []
         ci1_i = []
+        t1 = (logger.process_clock (), logger.perf_counter ())
         if smult > 2: # spin-lowered
             log.info ("LASSIS fragment %d spin down (%de,%do;2S+1=%d)",
                       ifrag, nelec, norb, smult-2)
@@ -370,9 +354,14 @@ def all_spin_flips (lsi, las, ci_sf, nspin=1, ham_2q=None):
             spins1_i.append (smult-3)
             ci0 = ci_sf[ifrag][0]
             m2 = np.sign (spin) * (abs (spin) - 2) if abs (spin) > 1 else spin
-            conv, ci1_i_down = cisolve (smult-2, m2, ndn0[ifrag], ci0)
+            conv, e_i_down, ci1_i_down = cisolve (smult-2, m2, ndn0[ifrag], ci0)
+            log.info ("LASSIS fragment %d spin down (%de,%do;2S+1=%d) statelet energies:",
+                      ifrag, nelec, norb, smult-2)
+            for ix, e in enumerate (e_i_down):
+                log.info (" %d %15.10e", ix, e)
             if not conv: log.warn ("CI vectors for spin-lowering of fragment %i not converged",
                                    ifrag)
+            t1 = log.timer ("LASSIS fragment {} spin down CI solve".format (ifrag), *t1)
             converged = converged & conv
             ci_sf[ifrag][0] = ci1_i_down
             ci1_i.append (ci1_i_down)
@@ -385,9 +374,14 @@ def all_spin_flips (lsi, las, ci_sf, nspin=1, ham_2q=None):
             spins1_i.append (smult+1)
             ci0 = ci_sf[ifrag][1]
             m2 = np.sign (spin) * (abs (spin) + 2)
-            conv, ci1_i_up = cisolve (smult+2, m2, nup0[ifrag], ci0)
+            conv, e_i_down, ci1_i_up = cisolve (smult+2, m2, nup0[ifrag], ci0)
+            log.info ("LASSIS fragment %d spin up (%de,%do;2S+1=%d) statelet energies:",
+                      ifrag, nelec, norb, smult+2)
+            for ix, e in enumerate (e_i_down):
+                log.info ("%d %15.10e", ix, e)
             if not conv: log.warn ("CI vectors for spin-raising of fragment %i not converged",
                                    ifrag)
+            t1 = log.timer ("LASSIS fragment {} spin up CI solve".format (ifrag), *t1)
             converged = converged & conv
             ci_sf[ifrag][1] = ci1_i_up
             ci1_i.append (ci1_i_up)
@@ -395,7 +389,9 @@ def all_spin_flips (lsi, las, ci_sf, nspin=1, ham_2q=None):
         spins1.append (spins1_i)
         ci1.append (ci1_i)
         i = j
-    spin_flips = [SpinFlips (c,no,ne,m,s) for c,no,ne,m,s in zip (ci1,norb0,nelec0,spins1,smults1)]
+    spin_flips = [SpinFlips (las.mol,c,no,ne,m,s)
+                  for c,no,ne,m,s in zip (ci1,norb0,nelec0,spins1,smults1)]
+    t0 = log.timer ("LASSIS spin flip all CI solves", *t0)
     return converged, spin_flips, ci_sf
 
 def _spin_flip_products (spaces, spin_flips, nroots_ref=1, frozen_frags=None):
@@ -442,32 +438,29 @@ def _spin_shuffle_ci_(spaces, spin_flips, nroots_ref, nroots_refc):
     of vectors per fragment Hilbert space and that all possible individual
     fragment spins must be accounted for already, so we are just recombining
     them.'''
-    old_idx = []
-    new_idx = []
     nfrag = spaces[0].nfrag
-    for ix, space in enumerate (spaces):
-        if space.has_ci ():
-            old_idx.append (ix)
-        else:
-            assert (ix >= nroots_refc)
-            new_idx.append (ix)
-            space.ci = [None for ifrag in range (space.nfrag)]
+    charges0 = spaces[0].charges
+    smults0 = spaces[0].smults
+    # Prepare reference szrots
+    spaces[0].fcisolvers = spaces[0].get_fcisolvers ()
+    ci_szrot_ref = spaces[0].get_ci_szrot ()
+    solvers_szrot_ref = spaces[0].get_fcisolvers_szrot ()
     # Prepare charge-hop szrots
     spaces_1c = spaces[nroots_ref:nroots_refc]
     spaces_1c = [space for space in spaces_1c if len (space.entmap)==1]
     ci_szrot_1c = []
+    solvers_szrot_1c = []
     for ix, space in enumerate (spaces_1c):
         ifrag, jfrag = space.entmap[0] # must be a tuple of length 2
         ci_szrot_1c.append (space.get_ci_szrot (ifrags=(ifrag,jfrag)))
-    charges0 = spaces[0].charges
-    smults0 = spaces[0].smults
-    # Prepare reference szrots
-    ci_szrot_ref = spaces[0].get_ci_szrot ()
-    for ix in new_idx:
-        idx = spaces[ix].excited_fragments (spaces[0])
-        space = spaces[ix]
+        solvers_szrot_1c.append (space.get_fcisolvers_szrot (ifrags=(ifrag,jfrag)))
+    for space in spaces[1:]:
+        space.ci = [None for ifrag in range (space.nfrag)]
+        space.fcisolvers = [None for ifrag in range (space.nfrag)]
+        idx = space.excited_fragments (spaces[0])
         for ifrag in np.where (~idx)[0]:
             space.ci[ifrag] = spaces[0].ci[ifrag]
+            space.fcisolvers[ifrag] = spaces[0].fcisolvers[ifrag]
         for ifrag in np.where (idx)[0]:
             if space.charges[ifrag] != charges0[ifrag]: continue
             if space.smults[ifrag] != smults0[ifrag]:
@@ -477,11 +470,13 @@ def _spin_shuffle_ci_(spaces, spin_flips, nroots_ref, nroots_refc):
                 assert (np.count_nonzero (iflp) == 1)
                 iflp = np.where (iflp)[0][0]
                 space.ci[ifrag] = sf.ci[iflp]
+                space.fcisolvers[ifrag] = sf.fcisolvers[iflp]
             else: # Reference-state spin-shuffles
                 space.ci[ifrag] = ci_szrot_ref[ifrag][space.spins[ifrag]]
-        for (ci_i, ci_j), sp_1c in zip (ci_szrot_1c, spaces_1c):
+                space.fcisolvers[ifrag] = solvers_szrot_ref[ifrag][space.spins[ifrag]]
+        for (ci_i, ci_j), (s_i, s_j), sp_1c in zip (ci_szrot_1c, solvers_szrot_1c, spaces_1c):
             ijfrag = sp_1c.entmap[0]
-            if ijfrag not in spaces[ix].entmap: continue
+            if ijfrag not in space.entmap: continue
             if np.any (sp_1c.charges[list(ijfrag)] != space.charges[list(ijfrag)]): continue
             if np.any (sp_1c.smults[list(ijfrag)] != space.smults[list(ijfrag)]): continue
             ifrag, jfrag = ijfrag
@@ -489,49 +484,63 @@ def _spin_shuffle_ci_(spaces, spin_flips, nroots_ref, nroots_refc):
             assert (space.ci[jfrag] is None)
             space.ci[ifrag] = ci_i[space.spins[ifrag]]
             space.ci[jfrag] = ci_j[space.spins[jfrag]]
+            space.fcisolvers[ifrag] = s_i[space.spins[ifrag]]
+            space.fcisolvers[jfrag] = s_j[space.spins[jfrag]]
         assert (space.has_ci ()), '{} {} {} {}'.format (space.charges, space.smults, space.spins, charges0)
     return spaces
 
 def spin_flip_products (las, spaces, spin_flips, nroots_ref=1):
     '''Inject spin-flips into spaces in all possible ways, carry out a spin shuffle, and log'''
+    t0 = (logger.process_clock (), logger.perf_counter ())
     log = logger.new_logger (las, las.verbose)
     nspaces = len (spaces)
+    t1 = (logger.process_clock (), logger.perf_counter ())
     spaces = _spin_flip_products (spaces, spin_flips, nroots_ref=nroots_ref)
+    t1 = log.timer ("LASSIS spin-flip bare injection", *t0)
     nfrags = spaces[0].nfrag
-    spaces = _spin_shuffle (spaces)
+    spaces = _spin_shuffle (spaces, las=las)
+    t1 = log.timer ("LASSIS spin shuffle tabulation", *t1)
     spaces = _spin_shuffle_ci_(spaces, spin_flips, nroots_ref, nspaces)
+    t1 = log.timer ("LASSIS spin shuffle CI population", *t1)
     log.debug ("LASSIS spin-excitation spaces: %d-%d", nspaces, len (spaces)-1)
     for i, space in enumerate (spaces[nspaces:]):
         if np.any (space.nelec != spaces[0].nelec):
-            log.debug ("Spin/charge-excitation space %d:", i+nspaces)
+            log.debug2 ("Spin/charge-excitation space %d:", i+nspaces)
         else:
-            log.debug ("Spin-excitation space %d:", i+nspaces)
-        space.table_printlog (tverbose=logger.DEBUG)
+            log.debug2 ("Spin-excitation space %d:", i+nspaces)
+        space.table_printlog (tverbose=logger.DEBUG2)
+    t1=log.timer ("LASSIS spin-flip table_print", *t1)
+    log.timer ("LASSIS spin-flip injection", *t0)
     return spaces
 
-def charge_excitation_products (lsi, spaces, nroots_ref=0, space0=None):
+
+def charge_excitation_products (lsi, spaces, spaces_ch, nroots_ref=0, space0=None):
     t0 = (logger.process_clock (), logger.perf_counter ())
     log = logger.new_logger (lsi, lsi.verbose)
     mol = lsi.mol
     nfrags = lsi.nfrags
     if space0 is None: space0 = spaces[0]
     i0, j0 = i, j = nroots_ref, len (spaces)
+    n0 = 0
+    t1 = t0
     for product_order in range (2, (nfrags//2)+1):
         seen = set ()
-        for i_list in itertools.combinations (range (i,j), product_order):
-            p_list = [spaces[ip] for ip in i_list]
-            nonorth = False
-            for p, q in itertools.combinations (p_list, 2):
-                if not orthogonal_excitations (p, q, space0):
-                    nonorth = True
-                    break
-            if nonorth: continue
-            p = p_list[0]
-            for q in p_list[1:]:
-                p = combine_orthogonal_excitations (p, q, space0)
-            spaces.append (p)
-            log.debug ("Electron hop product space %d (product of %s)", len (spaces) - 1, str (i_list))
-            spaces[-1].table_printlog (tverbose=logger.DEBUG)
+        for p in spaces[i:j]:
+            ia = np.where (~p.excited_fragments (space0, ignore_m=True))[0]
+            for i,a in itertools.permutations (ia, r=2):
+                for q in spaces_ch[i][a]:
+                    assert (orthogonal_excitations (p, q, space0, ignore_m=True))
+                    r = combine_orthogonal_excitations (p, q, space0, flexible_m=True)
+                    n0 += 1
+                    if r not in seen:
+                        seen.add (r)
+                        spaces.append (r)
+                        log.debug2 ("Electron hop product space %d", len (spaces) - 1)
+                        spaces[-1].table_printlog (tverbose=logger.DEBUG2)
+        i = j
+        j = len (spaces)
+        t1 = log.timer ("LASSIS charge-hop product_order {} ({} {})".format (
+            product_order, n0, j-i), *t1)
     assert (len (spaces) == len (set (spaces)))
     log.timer ("LASSIS charge-hop product generation", *t0)
     return spaces
@@ -584,6 +593,7 @@ class LASSIS_Scanner(lib.SinglePointScanner):
         return e_tot
 
 class LASSIS (LASSI):
+    _method_key = 'lsis'
     def __init__(self, las, ncharge='s', nspin='s', sa_heff=True, deactivate_vrv=False,
                  crash_locmin=False, opt=1, **kwargs):
         '''
@@ -607,18 +617,67 @@ class LASSIS (LASSI):
         self.deactivate_vrv = deactivate_vrv
         self.crash_locmin = crash_locmin
         self.e_states_meaningless = True # a tag to silence an invalid warning
+        self.mask_charge_hops = None
         LASSI.__init__(self, las, opt=opt, **kwargs)
-        self.max_cycle_macro = 50
-        self.conv_tol_self = 1e-8
+        self._max_cycle_macro = None
+        self._conv_tol_self = None
         self.ci_spin_flips = [[None for s in range (2)] for i in range (self.nfrags)]
+        self.cisolver_attr_spin_flips = {}
         self.ci_charge_hops = [[[[None,None] for s in range (4)]
                                 for a in range (self.nfrags)]
                                for i in range (self.nfrags)]
+        self.cisolver_attr_charge_hops = {}
         self._cached_ham_2q = None
         self.ci = None
         if las.nroots>1:
             logger.warn (self, ("Only the first LASSCF state is used by LASSIS! "
                                 "Other states are discarded!"))
+
+    def get_o1_chk_hash (self):
+        m = LASSI.get_o1_chk_hash (self)
+        m.update (bytes (str (self.ncharge), encoding='utf8'))
+        m.update (bytes (str (self.nspin), encoding='utf8'))
+        if self.mask_charge_hops is not None:
+            m.update (self.mask_charge_hops.tobytes ())
+        return m
+
+    @property
+    def conv_tol_self (self):
+        return self._conv_tol_self
+
+    @conv_tol_self.setter
+    def conv_tol_self (self, x):
+        log = logger.new_logger (self, self.verbose)
+        log.warn (("LASSIS conv_tol_self is deprecated. Set "
+                   "cisolver_attr_charge_hops['conv_tol_self'] in the future"))
+        self._conv_tol_self = x
+
+    @property
+    def max_cycle_macro (self):
+        return self._max_cycle_macro
+
+    @max_cycle_macro.setter
+    def max_cycle_macro (self, x):
+        log = logger.new_logger (self, self.verbose)
+        log.warn (("LASSIS max_cycle_macro is deprecated. Set "
+                   "cisolver_attr_charge_hops['max_cycle'] in the future"))
+        self._max_cycle_macro = x
+
+    def copy (self):
+        # semi-deep copy of nested lists
+        mycopy = super().copy ()
+        mycopy._las = self._las.copy ()
+        mycopy.ci_spin_flips = [
+            [xis for xis in xi]
+            for xi in self.ci_spin_flips
+        ]
+        mycopy.ci_charge_hops = [
+            [[[xiasp for xiasp in xias]
+              for xias in xia]
+             for xia in xi]
+            for xi in self.ci_charge_hops
+        ]
+        return mycopy
 
     def ham_2q (self, *args, **kwargs):
         if self._cached_ham_2q is not None: return self._cached_ham_2q
@@ -638,23 +697,30 @@ class LASSIS (LASSI):
         return h1_no_soc
 
     def kernel (self, ncharge=None, nspin=None, sa_heff=None, deactivate_vrv=None,
-                crash_locmin=None, **kwargs):
+                crash_locmin=None, mask_charge_hops=None, **kwargs):
+        if mask_charge_hops is not None:
+            self.mask_charge_hops = mask_charge_hops
+        if nspin is not None:
+            self.nspin = nspin
+        if ncharge is not None:
+            self.ncharge = ncharge
         t0 = (logger.process_clock (), logger.perf_counter ())
         log = logger.new_logger (self, self.verbose)
         h0, h1, h2 = self.ham_2q(soc=self.soc)
         t1 = log.timer ("LASSIS integral transformation", *t0)
 
         with lib.temporary_env (self, _cached_ham_2q=(h0, self.h1_no_SOC(h1), h2)):
-            self.converged = self.prepare_states_(ncharge=ncharge, nspin=nspin,
-                                                  sa_heff=sa_heff, deactivate_vrv=deactivate_vrv,
-                                                  crash_locmin=crash_locmin)
+            self.converged = self.prepare_states_(
+                ncharge=ncharge, nspin=nspin, sa_heff=sa_heff,
+                deactivate_vrv=deactivate_vrv, crash_locmin=crash_locmin
+            )
 
         with lib.temporary_env (self, _cached_ham_2q=(h0, h1, h2)):
             t1 = log.timer ("LASSIS state preparation", *t1)
             self.e_roots, self.si = self.eig (**kwargs)
             t1 = log.timer ("LASSIS diagonalization", *t1)
 
-        log.timer ("LASSIS", *t0)
+        log.timer ("LASSIS kernel", *t0)
         return self.e_roots, self.si
 
     def get_ci_ref (self):
@@ -693,6 +759,16 @@ class LASSIS (LASSI):
         self.ci_spin_flips = ci_sf
         self.ci_charge_hops = ci_ch
 
+        self.prepare_model_states_(ci_ref=ci_ref, ci_sf=ci_sf, ci_ch=ci_ch)
+        log.info ('LASSIS model state summary: %d rootspaces; %d model states; converged? %s',
+                  self.nroots, self.get_lroots ().prod (0).sum (), str (self.converged))
+        log.info ('LASSIS overall max disc sval: %e', self.max_disc_sval)
+        return self.converged
+
+    def prepare_model_states_(self, ci_ref=None, ci_sf=None, ci_ch=None):
+        if ci_ref is None: ci_ref = self.get_ci_ref ()
+        if ci_sf is None: ci_sf = self.ci_spin_flips
+        if ci_ch is None: ci_ch = self.ci_charge_hops
         las, self.entmaps = self.prepare_model_states (ci_ref, ci_sf, ci_ch)
         #self.__dict__.update(las.__dict__) # Unsafe
         self.fciboxes = las.fciboxes
@@ -701,10 +777,8 @@ class LASSIS (LASSI):
         self.weights = las.weights
         self.e_lexc = las.e_lexc
         self.e_states = las.e_states
-        log.info ('LASSIS model state summary: %d rootspaces; %d model states; converged? %s',
-                  self.nroots, self.get_lroots ().prod (0).sum (), str (self.converged))
-        log.info ('LASSIS overall max disc sval: %e', self.max_disc_sval)
-        return self.converged
+        self._reset_o1_chk ()
+        return
 
     def energy_tot (self, mo_coeff=None, ci_ref=None, ci_sf=None, ci_ch=None, si=None, soc=None):
         if ci_ref is None: ci_ref = self.get_ci_ref ()
@@ -714,16 +788,30 @@ class LASSIS (LASSI):
         las = self.prepare_model_states (ci_ref, ci_sf, ci_ch)[0]
         ci = las.ci
         self.fciboxes = las.fciboxes # TODO: set this at initialization
+        self.nroots = las.nroots
         return LASSI.energy_tot (self, mo_coeff=mo_coeff, ci=ci, si=si, soc=soc)
 
     def get_lroots (self, ci=None):
         if ci is None: ci = self.ci
         if ci is None:
-            with lib.temporary_env (self, max_cycle_macro=0):
+            chattr = {k: v for k, v in self.cisolver_attr_charge_hops.items ()}
+            chattr['max_cycle'] = 0
+            sfattr = {k: v for k, v in self.cisolver_attr_spin_flips.items ()}
+            sfattr['max_cycle'] = 0
+            with lib.temporary_env (self, cisolver_attr_charge_hops=chattr,
+                                    cisolver_attr_spin_flips=sfattr):
                 self.prepare_states_()
             ci = self.ci
         assert (ci is not None)
         return LASSI.get_lroots (self, ci=ci)
+
+    def get_disc_fr (self):
+        disc_fr = -np.ones ((self.nfrags, self.nroots), dtype=int)
+        for i, ents in enumerate (self.entmaps):
+            for j,k in ents:
+                disc_fr[j,i] = k
+                disc_fr[k,i] = j
+        return disc_fr
 
     def get_raw2orth (self, ci_ref=None, ci_sf=None, ci_ch=None, soc=None, opt=None):
         if ci_ref is None: ci_ref = self.get_ci_ref ()
@@ -739,6 +827,8 @@ class LASSIS (LASSI):
     as_scanner = as_scanner
     prepare_fbf = prepare_fbf
     prepare_model_states = prepare_model_states
+    dump_chk = chkfile.dump_lsis
+    load_chk = load_chk_ = chkfile.load_lsis_
 
     def get_ref_fbf_rootspaces (self, ifrag):
         '''Identify which rootspaces correspond to the reference wave function for a given

@@ -2,12 +2,13 @@ import numpy as np
 from scipy import linalg
 from pyscf.fci.direct_spin1 import _unpack_nelec
 from pyscf.fci import cistring
-from pyscf.lib import logger
+from pyscf.lib import logger, issequence
 from pyscf.lo.orth import vec_lowdin
 from pyscf import symm, __config__
 from mrh.my_pyscf.lib.logger import select_log_printer
 from mrh.my_pyscf.fci import csf_solver
 from mrh.my_pyscf.fci.spin_op import contract_sdown, contract_sup, mdown, mup
+from mrh.my_pyscf.fci.spin_op import norm_sdown, norm_sup
 from mrh.my_pyscf.fci.csfstring import CSFTransformer
 from mrh.my_pyscf.fci.csfstring import ImpossibleSpinError
 from mrh.my_pyscf.mcscf.productstate import ImpureProductStateFCISolver
@@ -33,22 +34,32 @@ class SingleLASRootspace (object):
         self.ci = ci
         self.fragsym = fragsym
 
-        self.nelec = self.nelelas - self.charges
-        self.neleca = (self.nelec + self.spins) // 2
-        self.nelecb = (self.nelec - self.spins) // 2
-        self.nhole = 2*self.nlas - self.nelec 
-        self.nholea = self.nlas - self.neleca
-        self.nholeb = self.nlas - self.nelecb
-
-        # "u", "d": like "a", "b", but presuming spins+1==smults everywhere
-        self.nelecu = (self.nelec + (self.smults-1)) // 2
-        self.nelecd = (self.nelec - (self.smults-1)) // 2
-        self.nholeu = self.nlas - self.nelecu
-        self.nholed = self.nlas - self.nelecd
-
         self.energy_tot = energy_tot
 
         self.entmap = tuple ()
+
+    @property
+    def nelec (self): return self.nelelas - self.charges
+    @property
+    def neleca (self): return (self.nelec + self.spins) // 2
+    @property
+    def nelecb (self): return (self.nelec - self.spins) // 2
+    @property
+    def nhole (self): return 2*self.nlas - self.nelec 
+    @property
+    def nholea (self): return self.nlas - self.neleca
+    @property
+    def nholeb (self): return self.nlas - self.nelecb
+
+    # "u", "d": like "a", "b", but presuming spins+1==smults everywhere
+    @property
+    def nelecu (self): return (self.nelec + (self.smults-1)) // 2
+    @property
+    def nelecd (self): return (self.nelec - (self.smults-1)) // 2
+    @property
+    def nholeu (self): return self.nlas - self.nelecu
+    @property
+    def nholed (self): return self.nlas - self.nelecd
 
     def __eq__(self, other):
         if self.nfrag != other.nfrag: return False
@@ -57,8 +68,8 @@ class SingleLASRootspace (object):
                 np.all (self.charges==other.charges))
 
     def __hash__(self):
-        return hash (tuple ([self.nfrag,] + list (self.spins) + list (self.smults)
-                            + list (self.charges) + list (self.entmap)))
+        return hash ((self.nfrag,) + tuple (self.spins) + tuple (self.smults)
+                     + tuple (self.charges) + self.entmap)
 
     def possible_excitation (self, i, a, s):
         i, a, s = np.atleast_1d (i, a, s)
@@ -129,11 +140,11 @@ class SingleLASRootspace (object):
         elif i_b_pos and a_b_pos:
             sp = self.get_single (i, a, 1, dsi, dsa)
         elif i_a_pos and a_b_pos and max_up:
-            p = np.where (ofrags & (self.spins<self.smults))[0][0]
+            p = np.where (ofrags & (self.spins<(self.smults-1)))[0][0]
             dsp = 1 if self.nholeu[p]>0 else -1
             sp = self.get_single (i, p, 0, dsi, dsp).get_single (p, a, 1, -dsp, dsa)
         elif i_b_pos and a_a_pos and max_dn:
-            p = np.where (ofrags & (self.spins>-self.smults))[0][0]
+            p = np.where (ofrags & (self.spins>(1-self.smults)))[0][0]
             dsp = 1 if self.nholeu[p]>0 else -1
             sp = self.get_single (i, p, 1, dsi, dsp).get_single (p, a, 0, -dsp, dsa)
         else:
@@ -167,14 +178,16 @@ class SingleLASRootspace (object):
         if self.smults[i]<max_smult: dsmult.append (+1)
         return dsmult
 
-    def get_singles (self):
+    def get_singles (self, mask=None):
         log = logger.new_logger (self, self.verbose)
+        if mask is None: mask = np.ones ((self.nfrag, self.nfrag), dtype=bool)
         # move 1 alpha electron
         has_ea = np.where (self.neleca > 0)[0]
         has_ha = np.where (self.nholea > 0)[0]
         singles = []
         for i, a in itertools.product (has_ea, has_ha):
             if i==a: continue
+            if not mask[i,a]: continue
             si_range = self.get_valid_smult_change (i, -1, 0)
             sa_range = self.get_valid_smult_change (a,  1, 0)
             for si, sa in itertools.product (si_range, sa_range):
@@ -187,6 +200,7 @@ class SingleLASRootspace (object):
         has_hb = np.where (self.nholeb > 0)[0]
         for i, a in itertools.product (has_eb, has_hb):
             if i==a: continue
+            if not mask[i,a]: continue
             si_range = self.get_valid_smult_change (i, 0, -1)
             sa_range = self.get_valid_smult_change (a, 0,  1)
             for si, sa in itertools.product (si_range, sa_range):
@@ -196,7 +210,7 @@ class SingleLASRootspace (object):
                     log.debug ('Caught ImpossibleSpinError: {}'.format (e.__dict__))
         return singles
 
-    def gen_spin_shuffles (self):
+    def make_spin_shuffle_table (self):
         assert ((np.sum (self.smults - 1) - np.sum (self.spins)) % 2 == 0)
         nflips = (np.sum (self.smults - 1) - np.sum (self.spins)) // 2
         spins_table = (self.smults-1).copy ()[None,:]
@@ -204,12 +218,51 @@ class SingleLASRootspace (object):
         for i in range (nflips):
             spins_table = spins_table[:,None,:] - subtrahend
             spins_table = spins_table.reshape (-1, self.nfrag)
+            spins_table = np.unique (spins_table, axis=0)
             # minimum valid value in column i is 1-self.smults[i]
             idx_valid = np.all (spins_table>-self.smults[None,:], axis=1)
             spins_table = spins_table[idx_valid,:]
+        return spins_table
+
+    def make_smult_shuffle_table (self, smult_lsf):
+        assert ((np.sum (self.smults-1) - (smult_lsf-1)) % 2 == 0)
+        nflips = (np.sum (self.smults-1) - (smult_lsf-1)) // 2
+        spins_table = (self.smults-1).copy ()
+        s2 = np.sort (spins_table)[::-1]
+        smult_max = s2.sum () + 1
+        smult_min = 2*(s2[0]+1)-smult_max
+        if (smult_lsf<smult_min) or (smult_lsf>smult_max):
+            return np.zeros ((0,self.nfrag),dtype=int)
+        spins_table = spins_table[None,:]
+        spins_gencoup = np.cumsum (spins_table, axis=1)
+        # first fragment is fixed
+        subtrahend = 2*np.eye (self.nfrag, dtype=spins_table.dtype)[None,1:,:]
+        for i in range (nflips):
+            spins_table = spins_table[:,None,:] - subtrahend
+            spins_table = spins_table.reshape (-1, self.nfrag)
+            spins_table = np.unique (spins_table, axis=0)
+            # cumulative sum must be nonnegative
+            spins_gencoup = np.cumsum (spins_table, axis=1)
+            idx_valid = np.all (spins_gencoup>=0, axis=1)
+            idx_valid &= np.all (spins_table>-self.smults[None,:], axis=1)
+            spins_table = spins_table[idx_valid,:]
+            spins_gencoup = spins_gencoup[idx_valid,:]
+            assert (np.all (spins_gencoup[:,-1] >= smult_lsf-1))
+        assert (np.all (spins_gencoup[:,-1] == smult_lsf-1))
+        # Minimum goes in both directions
+        for i in range (self.nfrag-1):
+            s2min = ((self.smults[i+1]-1)-spins_gencoup[:,i])
+            idx = spins_gencoup[:,i+1]>=s2min
+            spins_table = spins_table[idx]
+            spins_gencoup = spins_gencoup[idx]
+        return spins_table
+
+    def gen_spin_shuffles (self, spins_table=None):
+        if spins_table is None: spins_table = self.make_spin_shuffle_table ()
         for spins in spins_table:
             sp = SingleLASRootspace (self.las, spins, self.smults, self.charges, 0, nlas=self.nlas,
-                                     nelelas=self.nelelas, stdout=self.stdout, verbose=self.verbose)
+                                     nelelas=self.nelelas, fragsym=self.fragsym,
+                                     stdout=self.stdout, verbose=self.verbose)
             sp.entmap = self.entmap
             yield sp
 
@@ -243,19 +296,37 @@ class SingleLASRootspace (object):
             nvecs = ci1.shape[0]
             nelec1 = nelec
             for sz1 in range (sz-2, -(1+smult), -2):
-                ci1 = [contract_sdown (c, norb, nelec1) for c in ci1]
+                ci1 = [contract_sdown (c, norb, nelec1)
+                       / norm_sdown (smult, nelec1)
+                       for c in ci1]
                 nelec1 = nelec1[0]-1, nelec1[1]+1
                 if nvecs==1: ci_sz_[sz1] = ci1[0]
                 else: ci_sz_[sz1] = np.asarray (ci1)
             ci1 = np.asarray (ci).reshape (nvecs, ndeta, ndetb)
             nelec1 = nelec
             for sz1 in range (sz+2, (1+smult), 2):
-                ci1 = [contract_sup (c, norb, nelec1) for c in ci1]
+                ci1 = [contract_sup (c, norb, nelec1)
+                       / norm_sup (smult, nelec1)
+                       for c in ci1]
                 nelec1 = nelec1[0]+1, nelec1[1]-1
                 if nvecs==1: ci_sz_[sz1] = ci1[0]
                 else: ci_sz_[sz1] = np.asarray (ci1)
             ci_sz.append (ci_sz_)
         return ci_sz
+
+    def get_fcisolvers_szrot (self, ifrags=None):
+        fcisolvers_sz = []
+        if ifrags is None: ifrags = range (self.nfrag)
+        for ifrag in ifrags:
+            sz = self.spins[ifrag]
+            smult = self.smults[ifrag]
+            fcisolvers_sz_ = {sz: self.get_fcisolver (ifrag)}
+            for i, sz1 in enumerate (range (sz-2, -(1+smult), -2)):
+                fcisolvers_sz_[sz1] = self.get_fcisolver (ifrag, dspin=-2*(i+1))
+            for i, sz1 in enumerate (range (sz+2, (1+smult), 2)):
+                fcisolvers_sz_[sz1] = self.get_fcisolver (ifrag, dspin=2*(i+1))
+            fcisolvers_sz.append (fcisolvers_sz_)
+        return fcisolvers_sz
 
     def get_ndet (self):
         return [(cistring.num_strings (self.nlas[i], self.neleca[i]),
@@ -364,6 +435,7 @@ class SingleLASRootspace (object):
             row = [ifrag, nelec_norb, sm, irname]
             if lroots is not None: row += [lroots[ifrag]]
             printer (fmt_str.format (*row))
+        printer ('entmap: {}'.format (self.entmap))
 
     def single_fragment_spin_change (self, ifrag, new_smult, new_spin, ci=None):
         smults1 = self.smults.copy ()
@@ -371,14 +443,14 @@ class SingleLASRootspace (object):
         smults1[ifrag] = new_smult
         spins1[ifrag] = new_spin
         ci1 = None
-        if ci is not None:
+        if (ci is not None) and self.has_ci ():
             ci1 = [c for c in self.ci]
             ci1[ifrag] = ci
         sp = SingleLASRootspace (self.las, spins1, smults1, self.charges, 0, nlas=self.nlas,
                                  nelelas=self.nelelas, stdout=self.stdout, verbose=self.verbose,
                                  ci=ci1)
         sp.entmap = self.entmap
-        assert (ci is sp.ci[ifrag])
+        if sp.has_ci (): assert (ci is sp.ci[ifrag])
         return sp
 
     def is_orthogonal_by_smult (self, other):
@@ -393,15 +465,50 @@ class SingleLASRootspace (object):
         return (max_self < min_other) or (max_other < min_self)
 
     def get_fcisolvers (self):
-        fcisolvers = []
-        for ifrag in range (self.nfrag):
-            solver = csf_solver (self.las.mol, smult=self.smults[ifrag])
-            solver.nelec = (self.neleca[ifrag],self.nelecb[ifrag])
-            solver.norb = self.nlas[ifrag]
-            solver.spin = self.spins[ifrag]
-            solver.check_transformer_cache ()
-            fcisolvers.append (solver)
-        return fcisolvers
+        return [self.get_fcisolver (ifrag) for ifrag in range (self.nfrag)]
+
+    def get_fcisolver (self, ifrag, dspin=0):
+        assert (dspin % 2 == 0)
+        solver = csf_solver (self.las.mol, smult=self.smults[ifrag])
+        solver.nelec = (self.neleca[ifrag]+(dspin//2),
+                        self.nelecb[ifrag]-(dspin//2))
+        solver.norb = self.nlas[ifrag]
+        solver.spin = self.spins[ifrag] + dspin
+        solver.check_transformer_cache ()
+        return solver
+
+    def check_fcisolver (self, ifrag, fcisolver):
+        app = True
+        nelec = (self.neleca[ifrag], self.nelecb[ifrag])
+        if not hasattr (fcisolver, 'nelec'):
+            app = False
+        elif _unpack_nelec (fcisolver.nelec) != nelec:
+            app = False
+        if getattr (fcisolver, 'norb', None) != self.nlas[ifrag]:
+            app = False
+        if getattr (fcisolver, 'spin', None) != self.spins[ifrag]:
+            app = False
+        if app:
+            fcisolver.check_transformer_cache ()
+        else:
+            fcisolver = self.get_fcisolver (ifrag)
+        return fcisolver
+
+    def civecs_have_good_spin (self, ifrag=None, ci=None):
+        if ci is None:
+            assert (self.has_ci ())
+            ci = self.ci
+        if ifrag is None:
+            ifrag = list (range (self.nfrag))
+        if issequence (ifrag):
+            result = True
+            for iifrag in ifrag:
+                result = result and self.civecs_have_good_spin (ifrag=iifrag, ci=ci)
+            return result
+        ci = ci[ifrag]
+        t = self.get_fcisolver (ifrag).transformer
+        norm = t.vec_det2csf (ci, return_norm=True)[1]
+        return np.allclose (norm, 1.0)
 
     def get_product_state_solver (self, lroots=None, lweights='gs'):
         fcisolvers = self.get_fcisolvers ()
@@ -445,42 +552,57 @@ class SingleLASRootspace (object):
         s2[np.diag_indices_from (s2)] = s*(s+1)
         return s2.sum ()
 
-def orthogonal_excitations (exc1, exc2, ref):
+def orthogonal_excitations (exc1, exc2, ref, ignore_m=False):
     if exc1.nfrag != ref.nfrag: return False
     if exc2.nfrag != ref.nfrag: return False
-    idx1 = exc1.excited_fragments (ref)
+    idx1 = exc1.excited_fragments (ref, ignore_m=ignore_m)
     if not np.count_nonzero (idx1): return False
-    idx2 = exc2.excited_fragments (ref)
+    idx2 = exc2.excited_fragments (ref, ignore_m=ignore_m)
     if not np.count_nonzero (idx2): return False
     if np.count_nonzero (idx1 & idx2): return False
     return True
 
-def combine_orthogonal_excitations (exc1, exc2, ref):
+def combine_orthogonal_excitations (exc1, exc2, ref, flexible_m=False):
     nfrag = ref.nfrag
     spins = exc1.spins.copy ()
     smults = exc1.smults.copy ()
     charges = exc1.charges.copy ()
-    idx2 = exc2.excited_fragments (ref)
+    idx2 = exc2.excited_fragments (ref, ignore_m=flexible_m)
     spins[idx2] = exc2.spins[idx2]
     smults[idx2] = exc2.smults[idx2]
     charges[idx2] = exc2.charges[idx2]
     ci = None
-    if exc1.has_ci () and exc2.has_ci ():
+    if flexible_m:
+        delta_m = np.sum (spins) - np.sum (ref.spins)
+        if delta_m != 0:
+            sgn = -1 if delta_m > 0 else 1
+            delta_m = abs (delta_m)
+            dspins = (smults-1) - sgn*spins
+            assert (np.all (dspins>=0))
+            i = np.where (np.cumsum (dspins) >= delta_m)[0][0]
+            dspins[i:] = 0
+            dspins[i] = delta_m - np.sum (dspins)
+            spins += sgn * dspins
+        assert (spins.sum () == ref.spins.sum ())
+        assert (np.all (spins < smults))
+        assert (np.all (-spins < smults))
+    elif (exc1.has_ci () and exc2.has_ci ()):
         ci = [exc2.ci[ifrag] if idx2[ifrag] else exc1.ci[ifrag] for ifrag in range (nfrag)]
     product = SingleLASRootspace (
         ref.las, spins, smults, charges, 0, ci=ci,
         nlas=ref.nlas, nelelas=ref.nelelas, stdout=ref.stdout, verbose=ref.verbose
     )
-    product.entmap = tuple (set (exc1.entmap + exc2.entmap))
+    product.entmap = tuple (sorted (list (exc1.entmap + exc2.entmap)))
     #assert (np.amax (product.entmap) < 2)
     assert (len (product.entmap) == len (set (product.entmap)))
-    for ifrag in range (nfrag):
-        assert ((product.ci[ifrag] is exc1.ci[ifrag]) or
-                (product.ci[ifrag] is exc2.ci[ifrag]) or
-                (product.ci[ifrag] is ref.ci[ifrag]))
+    if not flexible_m:
+        for ifrag in range (nfrag):
+            assert ((product.ci[ifrag] is exc1.ci[ifrag]) or
+                    (product.ci[ifrag] is exc2.ci[ifrag]) or
+                    (product.ci[ifrag] is ref.ci[ifrag]))
     return product
 
-def all_single_excitations (las, verbose=None):
+def all_single_excitations (las, verbose=None, filter_shuffles=False, mask=None):
     '''Add states characterized by one electron hopping from one fragment to another fragment
     in all possible ways. Uses all states already present as reference states, so that calling
     this function a second time generates two-electron excitations, etc. The input object is
@@ -496,9 +618,12 @@ def all_single_excitations (las, verbose=None):
     for weight, state in zip (las.weights, ref_states): state.weight = weight
     new_states = []
     for ref_state in ref_states:
-        new_states.extend (ref_state.get_singles ())
+        new_states.extend (ref_state.get_singles (mask=mask))
     seen = set (ref_states)
     all_states = ref_states + [state for state in new_states if not ((state in seen) or seen.add (state))]
+    if filter_shuffles:
+        all_states = filter_single_excitation_spin_shuffles (las, all_states,
+                                                             nroots_ref=len(ref_states))
     log.info ('Built {} singly-excited LAS states from {} reference LAS states'.format (
         len (all_states) - len (ref_states), len (ref_states)))
     if len (all_states) == len (ref_states):
@@ -510,6 +635,78 @@ def all_single_excitations (las, verbose=None):
     smults = [state.smults for state in all_states]
     #wfnsyms = [state.wfnsyms for state in all_states]
     return las.state_average (weights=weights, charges=charges, spins=spins, smults=smults)
+
+def filter_single_excitation_spin_shuffles (lsi, spaces, nroots_ref=1):
+    spaces_ref = spaces[:nroots_ref]
+    spaces = spaces[nroots_ref:]
+    space0 = spaces_ref[0]
+
+    manifolds = []
+    for space in spaces:
+        isnew = True
+        for manifold in manifolds:
+            if space.is_spin_shuffle_of (manifold[0]):
+                manifold.append (space)
+                isnew = False
+                break                          
+        if isnew:
+            manifold = [space,]
+            manifolds.append (manifold)
+        
+    spaces = [select_single_excitation_from_spin_manifold (lsi, space0, manifold)
+              for manifold in manifolds]
+    return spaces_ref + spaces 
+        
+def select_single_excitation_from_spin_manifold (lsi, space0, manifold):
+    log = logger.new_logger (lsi)
+    nelec0 = space0.nelec
+    smults0 = space0.smults
+    spins0 = space0.spins
+    nelec1 = manifold[0].nelec
+    smults1 = manifold[0].smults
+    ifrag = np.where ((nelec1-nelec0)==-1)[0][0]
+    afrag = np.where ((nelec1-nelec0)==1)[0][0]
+    spins1 = np.abs (spins0.copy ())
+    target_sign = np.sign (spins0)
+    if (spins0[ifrag] == 0) and (spins0[afrag] == 0):
+        # arbitrarily preference alpha-electron hopping
+        target_sign[ifrag] = -1
+        target_sign[afrag] = 1
+    elif spins0[ifrag] == 0:
+        # set preference by receiving fragment
+        target_sign[ifrag] = -target_sign[afrag]
+    elif spins0[afrag] == 0:
+        # set preference by donating fragment
+        target_sign[afrag] = -target_sign[ifrag]
+    spins1[ifrag] += smults1[ifrag]-smults0[ifrag]
+    spins1[afrag] += smults1[afrag]-smults0[afrag]
+    spins1 = target_sign * spins1
+    assert (np.all (np.abs (spins1) < smults1))
+    spins = np.stack ([space.spins for space in manifold], axis=0)
+    dspins = np.abs (spins - spins1[None,:])
+    # Sort by smults; first for environment, then for active frags
+    sorter = smults1.copy ()
+    offset = np.amax (sorter)
+    sorter[ifrag] += offset
+    sorter[afrag] += offset
+    if sorter[ifrag] == sorter[afrag]:
+        sorter[afrag] += 1
+    idx = np.argsort (sorter, kind='stable')
+    dspins = dspins[:,idx]
+    dimsize = dspins.shape[0] * np.amax (dspins, axis=0)
+    dimsize = np.cumprod (dimsize[::-1]+1)[::-1]
+    scores = np.dot (dimsize, dspins.T)
+    # debrief
+    logstr = 'excitation {}->{}\nnelec_ref: {}\nsmults_ref: {}\nsmults_exc: {}\n'.format (
+        ifrag, afrag, nelec0, smults0, smults1)
+    logstr += 'ref spins: {}\ntarget spins: {}\n'.format (spins0, spins1)
+    for i, space in enumerate (manifold):
+        logstr += 'candidate spins: {}, score: {}\n'.format (space.spins, scores[i])
+    log.debug (logstr)
+    idx = (scores == np.amin (scores))
+    manifold = [space for i, space in enumerate (manifold) if idx[i]]
+    if len (manifold) > 1: raise RuntimeError (logstr)
+    return manifold[0]
 
 def spin_shuffle (las, verbose=None, equal_weights=False):
     '''Add states characterized by varying local Sz in all possible ways without changing
@@ -527,7 +724,7 @@ def spin_shuffle (las, verbose=None, equal_weights=False):
         raise NotImplementedError ("Point-group symmetry for LASSI state generator")
     ref_states = [SingleLASRootspace (las, m, s, c, 0) for c,m,s,w in zip (*get_space_info (las))]
     for weight, state in zip (las.weights, ref_states): state.weight = weight
-    all_states = _spin_shuffle (ref_states, equal_weights=equal_weights)
+    all_states = _spin_shuffle (ref_states, equal_weights=equal_weights, las=las)
     weights = [state.weight for state in all_states]
     charges = [state.charges for state in all_states]
     spins = [state.spins for state in all_states]
@@ -539,16 +736,31 @@ def spin_shuffle (las, verbose=None, equal_weights=False):
         log.warn ("no spin-shuffling options found for given LAS states")
     return las.state_average (weights=weights, charges=charges, spins=spins, smults=smults)
 
-def _spin_shuffle (ref_spaces, equal_weights=False):
+def _spin_shuffle (ref_spaces, equal_weights=False, las=None):
     '''The same as spin_shuffle, but the inputs and outputs are space lists rather than LASSCF
     instances and no logging is done.'''
+    #Passing in las for doing logging because this function is blowing up in many fragment case #VA - 7/24/25
+    t0 = (logger.process_clock (), logger.perf_counter ())
+    log = logger.new_logger (las, las.verbose)
     seen = set (ref_spaces)
     all_spaces = [space for space in ref_spaces]
+    t0 = log.timer ("Spin shuffle setup", *t0)
+    t1 = (logger.process_clock (), logger.perf_counter ())
+
+    #Original
     for ref_space in ref_spaces:
         for new_space in ref_space.gen_spin_shuffles ():
             if not new_space in seen:
                 all_spaces.append (new_space)
                 seen.add (new_space)
+    t1 = log.timer ("original version to do spin shuffle", *t1)
+    
+    #new version
+    #[seen.add(new_space) for ref_space in ref_spaces for new_space in ref_space.gen_spin_shuffles()]
+    #all_spaces=list(seen)
+    #t1 = log.timer ("new version to do spin shuffle", *t1)
+    #print('Checking for truth',set(all_spaces1)==set(all_spaces2), flush=True)
+
     if equal_weights:
         w = 1.0/len(all_spaces)
         for space in all_spaces: space.weight = w
@@ -652,7 +864,7 @@ def filter_spaces (las, max_charges=None, min_charges=None, max_smults=None, min
             of the supplied integers are removed
 
     Returns:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASCIFNoSymm`
             A copy is created
     '''
     log = logger.new_logger (las, las.verbose)

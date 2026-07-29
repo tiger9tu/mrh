@@ -3,13 +3,11 @@ import numpy as np
 from scipy import linalg
 from pyscf import lib
 from pyscf.mcscf import mc1step
-from mrh.my_pyscf.mcscf import lasci, lasscf_sync_o0
+from mrh.my_pyscf.mcscf import lasscf_sync_o0, lasscf_sync_o0
 from mrh.my_pyscf.mcscf.lasscf_guess import interpret_frags_atoms
 from mrh.my_pyscf.mcscf.lasscf_async import keyframe, combine
 from mrh.my_pyscf.mcscf.lasscf_async.split import get_impurity_space_constructor
 from mrh.my_pyscf.mcscf.lasscf_async.crunch import get_impurity_casscf
-
-from mrh.my_pyscf.gpu import libgpu
 
 def kernel (las, mo_coeff=None, ci0=None, conv_tol_grad=1e-4,
             assert_no_dupes=False, verbose=lib.logger.NOTE, frags_orbs=None,
@@ -129,9 +127,14 @@ def kernel (las, mo_coeff=None, ci0=None, conv_tol_grad=1e-4,
     log.info ('LASSCF E = %.15g ; |g| = %.15g', e_tot,
               norm_gvec)
     t1 = log.timer ('LASSCF final energy', *t1)
-    mo_coeff, mo_energy, mo_occ, ci1, h2eff_sub = las.canonicalize (mo_coeff, ci1, veff=veff,
-                                                                    h2eff_sub=h2eff_sub)
-    t1 = log.timer ('LASSCF canonicalization', *t1)
+    if las.canonicalization:
+        mo_coeff, mo_energy, mo_occ, ci1, h2eff_sub = las.canonicalize (
+            mo_coeff, ci1, veff=veff, h2eff_sub=h2eff_sub)
+        t1 = log.timer ('LASSCF canonicalization', *t1)
+    else:
+        fock = mo_coeff.conjugate ().T @ las.get_fock (mo_coeff=mo_coeff, ci=ci1,
+                                                       veff=veff)
+        mo_energy = (fock * mo_coeff).sum (0)
     t0 = log.timer ('LASSCF kernel function', *t0)
 
     e_cas = None # TODO: get rid of this worthless, meaningless variable
@@ -148,7 +151,7 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, kf=None):
             Contains molecular orbitals
         ci : list (length=nfrags) of list (length=nroots) of ndarray
             Contains CI vectors
-        ugg : instance of :class:`LASCI_UnitaryGroupGenerators`
+        ugg : instance of :class:`LASSCF_UnitaryGroupGenerators`
         kf : instance of :class:`LASKeyframe`
             Overrides mo_coeff and ci if provided and carries other intermediate
             quantities that may have been calculated in advance
@@ -186,7 +189,7 @@ class SortedIndexDict (dict):
         else:
             return dict.get (self, key)
 
-class LASSCFNoSymm (lasci.LASCINoSymm):
+class LASSCFNoSymm (lasscf_sync_o0.LASSCFNoSymm):
     '''Extra attributes:
 
     frags_orbs : list of length nfrags of list of integers
@@ -196,14 +199,14 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
         Use this to address, e.g., conv_tol_grad, max_cycle_macro, etc. of the impurity
         subproblems
     relax_params : dict
-        Key/value pairs are assigned as attributes to the active-active relaxation (``LASCI'')
+        Key/value pairs are assigned as attributes to the active-active relaxation (``LASSCF'')
         subproblem, similar to impurity_params. Use this to, e.g., set a different max_cycle_macro
-        for the ``LASCI'' step.
+        for the ``LASSCF'' step.
     combine_pair_max_frags : integer
         Maximum number of frags to simultaneously relax during the combine_pair step.
     '''
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASCINoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
+        lasscf_sync_o0.LASSCFNoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
                                    **kwargs)
         self.impurity_params = {}
         for i in range (self.nfrags):
@@ -249,6 +252,26 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
                 If false, this step is skipped and mo_coeff is returned unaltered
             frags_by_AOs: logical
                 If True, interpret integer frags_atoms as AOs rather than atoms
+            mo_occ: ndarray of shape (nmo)
+                If passed, only orbitals with the same occupancies are mixed with
+                each other to localize them and freeze_cas_spaces is automatically
+                set to True.
+            freeze_cas_spaces: logical
+                If true, then active orbitals are mixed only among themselves
+                when localizing, which leaves the inactive and external sectors
+                unchanged (to within numerical precision). Otherwise, active
+                orbitals are projected into the localized-orbital space and
+                the inactive and external orbitals are reconstructed as closely
+                as possible using SVD.
+            smults_f: ndarray of ints of shape (nfrag,)
+                Used to constrain how many singly-occupied orbitals (per mo_occ)
+                are assigned to each fragment, if possible. If las is a single-state
+                calculation, its quantum numbers are used as default values.
+            nelec_f: ndarray of ints of shape (nfrag,)
+                Used to constrain how many doubly-occupied orbitals (per mo_occ)
+                are assigned to each fragment, if possible. If las is a single-state
+                calculation, its quantum numbers are used as default values.
+
     
         Returns:
             mo_coeff: ndarray of shape (nao,nmo)
@@ -262,8 +285,9 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
                                                  frags_by_AOs=True, **kwargs) 
         return mo_coeff
     def dump_flags (self, verbose=None, _method_name='LASSCF'):
-        lasci.LASCINoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
-    def _finalize(self):
+        lasscf_sync_o0.LASSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
+
+    def _finalize(self, method='LASSCF'):
         log = lib.logger.new_logger (self, self.verbose)
         nroots_prt = len (self.e_states)
         if self.verbose <= lib.logger.INFO:
@@ -272,16 +296,16 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
             log.info (("Printing a maximum of 100 state energies;"
                        " increase self.verbose to see them all"))
         if nroots_prt > 1:
-            log.info ("LASSCF state-average energy = %.15g", self.e_tot)
+            log.info ("%s state-average energy = %.15g", method, self.e_tot)
             for i, e in enumerate (self.e_states):
-                log.info ("LASSCF state %d energy = %.15g", i, e)
+                log.info ("%s state %d energy = %.15g", method, i, e)
         else:
-            log.info ("LASSCF energy = %.15g", self.e_tot)
+            log.info ("%s energy = %.15g", method, self.e_tot)
         return
 
-class LASSCFSymm (lasci.LASCISymm):
+class LASSCFSymm (lasscf_sync_o0.LASSCFSymm):
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASCISymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
+        lasscf_sync_o0.LASSCFSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
         self.impurity_params = [{} for i in range (self.nfrags)]
         self.relax_params = {}
         keys = set (('frags_orbs','impurity_params','relax_params'))
@@ -312,7 +336,7 @@ def LASSCF (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
     else:
         las = LASSCFNoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     if getattr (mf, 'with_df', None):
-        las = lasci.density_fit (las, with_df = mf.with_df)
+        las = lasscf_sync_o0.density_fit (las, with_df = mf.with_df)
     return las
 
 if __name__=='__main__':

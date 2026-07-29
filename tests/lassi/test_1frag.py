@@ -48,6 +48,7 @@ class KnownValues(unittest.TestCase):
 
     def test_ss (self):
         las = LASSCF (mf, (4,), (4,), spin_sub=(1,)).set (conv_tol_grad=1e-5).run ()
+        self.assertTrue (las.converged)
         e_o0,si_o0=las.lassi(opt=0)
         e_o1,si_o1=las.lassi(opt=1)
         lsi = lassi.LASSI (las).run (davidson_only=True)
@@ -58,6 +59,7 @@ class KnownValues(unittest.TestCase):
     def test_sa (self):
         las = LASSCF (mf, (4,), (4,), spin_sub=(1,)).set (conv_tol_grad=1e-5)
         las.state_average_(weights=[0.5,0.5], spins=[0,2]).run ()
+        self.assertTrue (las.converged)
         nroots = len (mc_sa.e_states)
         e_o0,si_o0=las.lassi(opt=0)
         e_o1,si_o1=las.lassi(opt=1)
@@ -104,7 +106,9 @@ class KnownValues(unittest.TestCase):
     def test_contract_op_si (self):
         e_roots, si, las = lsi.e_roots, lsi.si, lsi._las
         h0, h1, h2 = lsi.ham_2q ()
-        case_contract_op_si (self, las, h1, h2, las.ci, lsi.get_nelec_frs ())
+        case_contract_op_si (self, las, h1, h2, las.ci, lsi.get_nelec_frs (),
+                             smult_fr=lsi.get_smult_fr (),
+                             disc_fr=lsi.get_disc_fr ())
 
 if __name__ == "__main__":
     print("Full Tests for LASSI single-fragment edge case")
