@@ -19,6 +19,9 @@ NROOTS = getattr (__config__, 'lassi_nroots_si', 1)
 DAVIDSON_SCREEN_THRESH = getattr (__config__, 'lassi_hsi_screen_thresh', 1e-12)
 PSPACE_SIZE = getattr (__config__, 'lassi_hsi_pspace_size', 400)
 PRIVREF = getattr (__config__, 'lassi_privref', True)
+SPIN_PENALTY = getattr (__config__, 'lassi_spin_penalty', 1.0)
+SPIN_PENALTY_BATCH_SIZE = getattr (
+    __config__, 'lassi_spin_penalty_batch_size', 128)
 
 op = (op_o0, op_o1)
 
@@ -215,6 +218,13 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
     screen_thresh = getattr (sisolver, 'davidson_screen_thresh', DAVIDSON_SCREEN_THRESH)
     pspace_size = getattr (sisolver, 'pspace_size', PSPACE_SIZE)
     smult = getattr (sisolver, 'smult', None)
+    # The Clebsch-Gordan basis requires every fragment CI vector to carry a
+    # definite local spin. Selected-CI spaces such as LUSCC can be globally
+    # spin complete while individual fragment vectors are local-spin mixtures.
+    # In that case retain the ordinary orthogonal basis and target total spin
+    # variationally with (S^2-S_target(S_target+1))^2.
+    use_spin_penalty = smult is not None and smult_fr is None
+    spin_penalty = getattr (sisolver, 'spin_penalty', SPIN_PENALTY)
     chkfile = getattr (sisolver, 'chkfile', None)
     h_op_raw, s2_op, ovlp_op, hdiag_raw, _get_ovlp = op[opt].gen_contract_op_si_hdiag (
         sisolver.las, h1, h2, ci_fr, nelec_frs, smult_fr=smult_fr, soc=soc, disc_fr=disc_fr,
@@ -224,14 +234,34 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
         # The sort is slow
         log.debug ("fingerprint of hdiag raw: %15.10e", lib.fp (np.sort (hdiag_raw)))
     t0 = (logger.process_clock (), logger.perf_counter ())
-    raw2orth = basis.get_orth_basis (ci_fr, norb_f, nelec_frs, _get_ovlp=_get_ovlp,
-                                     smult_fr=smult_fr, smult_si=smult, disc_fr=disc_fr)
+    raw2orth = basis.get_orth_basis (
+        ci_fr, norb_f, nelec_frs, _get_ovlp=_get_ovlp,
+        smult_fr=smult_fr, smult_si=None if use_spin_penalty else smult,
+        disc_fr=disc_fr)
     raw2orth.log_debug1_hdiag_raw (log, hdiag_raw)
     log.info ('%d/%d linearly independent model states', raw2orth.shape[0], raw2orth.shape[1])
     orth2raw = raw2orth.H
     mem_orth = raw2orth.get_nbytes () / 1e6
     t0 = log.timer ('LASSI get orthogonal basis ({:.2f} MB)'.format (mem_orth), *t0)
     hdiag_orth = op[opt].get_hdiag_orth (hdiag_raw, h_op_raw, raw2orth)
+    if use_spin_penalty:
+        target_s = (smult - 1) / 2
+        target_s2 = target_s * (target_s + 1)
+        # Supply Davidson with the actual diagonal of the squared-spin
+        # penalty. Without it the Hamiltonian-only preconditioner preferentially
+        # seeds the wrong spin sector and convergence can stall.
+        penalty_diag = np.empty_like (hdiag_orth)
+        eye = np.eye (raw2orth.shape[0], dtype=raw2orth.dtype)
+        batch_size = getattr (
+            sisolver, 'spin_penalty_batch_size', SPIN_PENALTY_BATCH_SIZE)
+        for p0 in range (0, raw2orth.shape[0], batch_size):
+            p1 = min (p0 + batch_size, raw2orth.shape[0])
+            x = eye[:,p0:p1]
+            s2x = raw2orth (s2_op (orth2raw (x)))
+            s2err = s2x - target_s2*x
+            penalty_diag[p0:p1] = np.einsum (
+                'ij,ij->j', s2err.conj (), s2err).real
+        hdiag_orth += spin_penalty * penalty_diag
     if verbose >= logger.DEBUG:
         # The sort is slow
         log.debug ("fingerprint of hdiag orth: %15.10e", lib.fp (np.sort (hdiag_orth)))
@@ -247,6 +277,9 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
                 penvalue = above - below + 0.001
                 log.debug ("Hdiag penalty value: %17.10e", penvalue)
                 hdiag_penalty[i:] = penvalue
+    if use_spin_penalty:
+        # The pspace Hamiltonian does not contain the matrix-free spin penalty.
+        pspace_size = 0
     if pspace_size:
         pw, pv, addr = pspace (hdiag_orth, h_op_raw, raw2orth, opt, pspace_size, log=log,
                                penalty=hdiag_penalty)
@@ -266,7 +299,16 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
         x0 = None
     x0 = sisolver.get_init_guess (hdiag_orth, nroots, x0, log=log, penalty=hdiag_penalty)
     def h_op (x):
-        return raw2orth (h_op_raw (orth2raw (x)))
+        hx = raw2orth (h_op_raw (orth2raw (x)))
+        if use_spin_penalty:
+            def s2_orth (y):
+                return raw2orth (s2_op (orth2raw (y)))
+            s2err = s2_orth (x) - target_s2*x
+            hx += spin_penalty * (s2_orth (s2err) - target_s2*s2err)
+        return hx
+    if use_spin_penalty:
+        log.info ('Targeting spin multiplicity %d with a %.6g Eh S^2 penalty',
+                  smult, spin_penalty)
     log.info ("LASSI E(const) = %15.10f", e0)
     conv, e, x1 = lib.davidson1 (lambda xs: [h_op (x) for x in xs],
                                  x0, precond_op, nroots=nroots,
@@ -274,6 +316,12 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
                                  max_space=max_space, tol=conv_tol)
     conv = all (conv)
     if not conv: log.warn ('LASSI Davidson diagonalization not converged')
+    # Penalized eigenvalues are not physical energies. Evaluate H itself for
+    # the converged vectors before returning.
+    if use_spin_penalty:
+        e = np.asarray ([np.dot (x.conj (),
+                         raw2orth (h_op_raw (orth2raw (x))))
+                         for x in x1]).real
     si1 = np.stack ([orth2raw (x) for x in x1], axis=-1)
     s2 = np.array ([np.dot (x.conj (), s2_op (x)) for x in si1.T])
     return conv, e, si1, s2
@@ -370,5 +418,3 @@ def kernel_incore (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, soc
     c = raw2orth.H (c)
     s2_blk = ((s2_blk @ c) * c.conj ()).sum (0)
     return True, e, c, s2_blk
-
-
