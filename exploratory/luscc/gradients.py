@@ -1,6 +1,6 @@
 import numpy as np
 from pyscf import lib
-from mrh.exploratory.unitary_cc import lasuccsd
+from .excitations import generate_interfragment_excitations
 
 def get_grad_exact(las, epsilon=0.0):
     """
@@ -13,7 +13,7 @@ def get_grad_exact(las, epsilon=0.0):
     gradients (array): all gradients
     gen_indices (list): all combinations i_idxs, a_idxs
     """
-    
+
     # Generate RDMs
     las_rdm1 = las.make_casdm1s()
     las_rdm2 = las.make_casdm2s()
@@ -28,14 +28,11 @@ def get_grad_exact(las, epsilon=0.0):
     h2las = h2e
 
     # Generate indices
-    nlas = las.ncas_sub
-    uop = lasuccsd.gen_uccsd_op(ncas,nlas)
-    a_idxs = uop.a_idxs
-    i_idxs = uop.i_idxs
+    a_idxs, i_idxs = generate_interfragment_excitations(ncas, las.ncas_sub)
 
     # Compute gradients and collect indices
     gen_indices = []
-    
+
     grad_h1t1 = get_grad_h1t1(a_idxs, i_idxs, las_rdm1, h1las)
     grad_h2t1 = get_grad_h2t1(a_idxs, i_idxs, las_rdm2, h2las)
     grad_h1t2 = get_grad_h1t2(a_idxs, i_idxs, las_rdm2, h1las)
@@ -46,7 +43,7 @@ def get_grad_exact(las, epsilon=0.0):
 
     # Select gradients
     g_selected, gen_ind_selected, a_idxs_selected, i_idxs_selected = [], [], [], []
-    
+
     for idx, grad in enumerate(gradients):
         if epsilon == 0.0 or abs(grad) > epsilon:
             g_selected.append((grad, idx))
@@ -54,8 +51,43 @@ def get_grad_exact(las, epsilon=0.0):
             gen_ind_selected.append((a_idx, i_idx))
             a_idxs_selected.append(a_idx)
             i_idxs_selected.append(i_idx)
-    
+
     return gradients, g_selected, a_idxs_selected, i_idxs_selected
+
+
+def make_casrdm123s_lassi(lsi, state=0):
+    """Build spin-resolved RDMs for one LASSI eigenstate."""
+    dm1s, dm2s = lsi.make_casdm12s(state=state)
+    dm3s = lsi.make_casdm3s(state=state)
+    dm2s = np.asarray(dm2s)
+    dm2_las = np.stack((dm2s[0, :, :, 0], dm2s[0, :, :, 1],
+                        dm2s[1, :, :, 1]))
+    return np.asarray(dm1s), dm2_las, np.asarray(dm3s)
+
+
+def get_grad_exact_lassi(lsi, state=0, epsilon=0.0):
+    """Calculate all LUSCC excitation gradients for a LASSI eigenstate."""
+    las = lsi._las
+    rdm1, rdm2, rdm3 = make_casrdm123s_lassi(lsi, state=state)
+    nmo, ncas, ncore = las.mo_coeff.shape[1], las.ncas, las.ncore
+    nocc = ncore + ncas
+    h2 = lib.numpy_helper.unpack_tril(
+        las.get_h2eff().reshape(nmo*ncas, ncas*(ncas+1)//2)
+    ).reshape(nmo, ncas, ncas, ncas)[ncore:nocc]
+    h1, _ = las.h1e_for_cas(mo_coeff=las.mo_coeff)
+    a_idxs, i_idxs = generate_interfragment_excitations(ncas, las.ncas_sub)
+    gradients = np.concatenate((
+        get_grad_h1t1(a_idxs, i_idxs, rdm1, h1)
+        + get_grad_h2t1(a_idxs, i_idxs, rdm2, h2),
+        get_grad_h1t2(a_idxs, i_idxs, rdm2, h1)
+        + get_grad_h2t2(a_idxs, i_idxs, rdm2, rdm3, h2),
+    ))
+    selected = [(gradient, index)
+                for index, gradient in enumerate(gradients)
+                if epsilon == 0.0 or abs(gradient) > epsilon]
+    indices = [index for _, index in selected]
+    return (gradients, selected, [a_idxs[index] for index in indices],
+            [i_idxs[index] for index in indices])
 
 def get_h1e_spin(h1):
     n = h1.shape[1]
@@ -128,7 +160,7 @@ def get_grad_h1t1(a_idxs, i_idxs, las_rdm1, h1):
 
     for u,x in zip(t1a,t1i):
         h1t1s.append(sum_h1t1[u,x])
-    
+
     return np.array(h1t1s)
 
 def get_grad_h2t1(a_idxs, i_idxs, las_rdm2, h2):
@@ -156,7 +188,7 @@ def get_grad_h2t1(a_idxs, i_idxs, las_rdm2, h2):
 def get_grad_h1t2(a_idxs, i_idxs, las_rdm2, h1):
     a_idxes = np.asarray(a_idxs, dtype=object)
     t1a = [a for b in a_idxes if len(b)==1 for a in b]
-    t2a = a_idxes[len(t1a):] 
+    t2a = a_idxes[len(t1a):]
     i_idxes = np.asarray(i_idxs, dtype=object)
     t1i = [a for b in i_idxes if len(b)==1 for a in b]
     t2i = i_idxes[len(t1i):]
@@ -176,7 +208,7 @@ def get_grad_h1t2(a_idxs, i_idxs, las_rdm2, h1):
         u,v = b
         x,y = z
         h1t2s.append(sum_h1t2[u,x,v,y])
-    
+
     return np.array(h1t2s)
 
 def get_grad_h2t2(a_idxs, i_idxs, las_rdm2, las_rdm3, h2):
@@ -194,7 +226,7 @@ def get_grad_h2t2(a_idxs, i_idxs, las_rdm2, las_rdm3, h2):
     w = g - gt
 
     h2t2s = []
-    
+
     # 2-RDM terms
     term1 = np.einsum('puqv,xpyq->uxvy',w,d2)
     term2 = np.einsum('pxqy,upvq->uxvy',w,d2)

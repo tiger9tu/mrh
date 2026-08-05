@@ -117,7 +117,6 @@ class FSUCCOperator (usccsd_sym0.FSUCCOperator):
         self.uniq_gen_idx = np.array ([x[0] for x in self.symtab_uscc])
         self.amps = np.zeros (self.ngen)
         self.assert_sanity ()
-        self.linearize = False
 
     def assert_sanity (self):
         norb = self.norb // 2
@@ -335,8 +334,8 @@ class UCCSD (UCCS):
 
 
 if __name__ == '__main__':
-    norb = 4
-    nelec = 4
+    # norb = 4
+    # nelec = 4
     def pbin (n, k=norb):
         s = bin (n)[2:]
         m = (2*k) - len (s)
