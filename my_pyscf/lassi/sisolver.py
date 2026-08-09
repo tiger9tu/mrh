@@ -19,9 +19,9 @@ NROOTS = getattr (__config__, 'lassi_nroots_si', 1)
 DAVIDSON_SCREEN_THRESH = getattr (__config__, 'lassi_hsi_screen_thresh', 1e-12)
 PSPACE_SIZE = getattr (__config__, 'lassi_hsi_pspace_size', 400)
 PRIVREF = getattr (__config__, 'lassi_privref', True)
-SPIN_PENALTY = getattr (__config__, 'lassi_spin_penalty', 1.0)
-SPIN_PENALTY_BATCH_SIZE = getattr (
-    __config__, 'lassi_spin_penalty_batch_size', 128)
+SPIN_PROJECT_TOL = getattr (__config__, 'lassi_spin_project_tol', 1.0e-7)
+SPIN_PROJECT_BATCH_SIZE = getattr (
+    __config__, 'lassi_spin_project_batch_size', 128)
 
 op = (op_o0, op_o1)
 
@@ -150,7 +150,14 @@ class SISolver (lib.StreamObject):
             i.e., the first model state.
         smult : int or None
             Spin-multiplicity of the desired roots when diagonalizing iteratively. If
-            unset, the lowest-energy roots are sought regardless of spin.
+            unset, the lowest-energy roots are sought regardless of spin. When local
+            fragment spins are unavailable, the requested sector is obtained by
+            diagonalizing the global S^2 matrix in the orthonormal model space.
+        spin_project_tol : float
+            Absolute tolerance for selecting S^2 eigenvalues belonging to smult.
+        spin_project_batch_size : int
+            Number of columns supplied to the matrix-free S^2 operator per batch while
+            constructing the numerical spin projector.
     '''
 
     def __init__(self, las, soc=0, opt=1, davidson_only=False, nroots=NROOTS,
@@ -168,6 +175,8 @@ class SISolver (lib.StreamObject):
         self.davidson_screen_thresh = DAVIDSON_SCREEN_THRESH
         self.pspace_size = PSPACE_SIZE
         self.privref = PRIVREF
+        self.spin_project_tol = SPIN_PROJECT_TOL
+        self.spin_project_batch_size = SPIN_PROJECT_BATCH_SIZE
         self.conv_tol = CONV_TOL
         self.nroots = nroots
         self.smult = None
@@ -195,6 +204,8 @@ class SISolver (lib.StreamObject):
         log.info('nroots = %d', self.nroots)
         log.info('pspace_size = %d', self.pspace_size)
         log.info('spin multiplicity = %s', self.smult)
+        log.info('spin projector tolerance = %g', self.spin_project_tol)
+        log.info('spin projector batch size = %d', self.spin_project_batch_size)
         log.info('privref = %s', self.privref)
         log.info('davidson_screen_thresh = %g', self.davidson_screen_thresh)
 
@@ -219,12 +230,10 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
     pspace_size = getattr (sisolver, 'pspace_size', PSPACE_SIZE)
     smult = getattr (sisolver, 'smult', None)
     # The Clebsch-Gordan basis requires every fragment CI vector to carry a
-    # definite local spin. Selected-CI spaces such as LUSCC can be globally
-    # spin complete while individual fragment vectors are local-spin mixtures.
-    # In that case retain the ordinary orthogonal basis and target total spin
-    # variationally with (S^2-S_target(S_target+1))^2.
-    use_spin_penalty = smult is not None and smult_fr is None
-    spin_penalty = getattr (sisolver, 'spin_penalty', SPIN_PENALTY)
+    # definite local spin. For selected-CI spaces such as LUSCC, construct the
+    # requested total-spin subspace by diagonalizing the matrix-free global S^2
+    # operator in the ordinary orthonormal model space instead.
+    use_spin_projector = smult is not None and smult_fr is None
     chkfile = getattr (sisolver, 'chkfile', None)
     h_op_raw, s2_op, ovlp_op, hdiag_raw, _get_ovlp = op[opt].gen_contract_op_si_hdiag (
         sisolver.las, h1, h2, ci_fr, nelec_frs, smult_fr=smult_fr, soc=soc, disc_fr=disc_fr,
@@ -236,7 +245,7 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
     t0 = (logger.process_clock (), logger.perf_counter ())
     raw2orth = basis.get_orth_basis (
         ci_fr, norb_f, nelec_frs, _get_ovlp=_get_ovlp,
-        smult_fr=smult_fr, smult_si=None if use_spin_penalty else smult,
+        smult_fr=smult_fr, smult_si=None if use_spin_projector else smult,
         disc_fr=disc_fr)
     raw2orth.log_debug1_hdiag_raw (log, hdiag_raw)
     log.info ('%d/%d linearly independent model states', raw2orth.shape[0], raw2orth.shape[1])
@@ -244,30 +253,49 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
     mem_orth = raw2orth.get_nbytes () / 1e6
     t0 = log.timer ('LASSI get orthogonal basis ({:.2f} MB)'.format (mem_orth), *t0)
     hdiag_orth = op[opt].get_hdiag_orth (hdiag_raw, h_op_raw, raw2orth)
-    if use_spin_penalty:
+    spin2orth = None
+    if use_spin_projector:
         target_s = (smult - 1) / 2
         target_s2 = target_s * (target_s + 1)
-        # Supply Davidson with the actual diagonal of the squared-spin
-        # penalty. Without it the Hamiltonian-only preconditioner preferentially
-        # seeds the wrong spin sector and convergence can stall.
-        penalty_diag = np.empty_like (hdiag_orth)
-        eye = np.eye (raw2orth.shape[0], dtype=raw2orth.dtype)
+        north = raw2orth.shape[0]
+        s2_orth = np.empty ((north, north), dtype=raw2orth.dtype)
         batch_size = getattr (
-            sisolver, 'spin_penalty_batch_size', SPIN_PENALTY_BATCH_SIZE)
-        for p0 in range (0, raw2orth.shape[0], batch_size):
-            p1 = min (p0 + batch_size, raw2orth.shape[0])
-            x = eye[:,p0:p1]
-            s2x = raw2orth (s2_op (orth2raw (x)))
-            s2err = s2x - target_s2*x
-            penalty_diag[p0:p1] = np.einsum (
-                'ij,ij->j', s2err.conj (), s2err).real
-        hdiag_orth += spin_penalty * penalty_diag
+            sisolver, 'spin_project_batch_size', SPIN_PROJECT_BATCH_SIZE)
+        for p0 in range (0, north, batch_size):
+            p1 = min (p0 + batch_size, north)
+            x = np.zeros ((north, p1-p0), dtype=raw2orth.dtype)
+            x[np.arange (p0, p1), np.arange (p1-p0)] = 1
+            s2_orth[:,p0:p1] = raw2orth (s2_op (orth2raw (x)))
+        s2_orth = (s2_orth + s2_orth.conj ().T) / 2
+        s2_e, s2_v = linalg.eigh (s2_orth)
+        spin_tol = getattr (sisolver, 'spin_project_tol', SPIN_PROJECT_TOL)
+        idx_spin = np.abs (s2_e - target_s2) < spin_tol
+        if not np.any (idx_spin):
+            nearest = s2_e[np.argmin (np.abs (s2_e-target_s2))]
+            raise RuntimeError (
+                'LASSI model space has no spin-multiplicity {} vector within '
+                'spin_project_tol={}; nearest S^2 eigenvalue is {}'.format (
+                    smult, spin_tol, nearest))
+        spin2orth = s2_v[:,idx_spin]
+        nspin = spin2orth.shape[1]
+        if nroots > nspin:
+            log.warn ('Requested %d roots but target-spin subspace has dimension %d; '
+                      'solving for %d roots', nroots, nspin, nspin)
+            nroots = nspin
+        # A diagonal-only projection is sufficient for Davidson's
+        # preconditioner; the matrix-vector operation below uses the exact
+        # projected Hamiltonian.
+        hdiag_orth = np.einsum (
+            'ip,i,ip->p', spin2orth.conj (), hdiag_orth, spin2orth).real
+        log.info ('Projected %d-dimensional orthogonal model space onto %d '
+                  'spin-multiplicity %d vectors (target S^2 = %.10g)',
+                  north, nspin, smult, target_s2)
     if verbose >= logger.DEBUG:
         # The sort is slow
         log.debug ("fingerprint of hdiag orth: %15.10e", lib.fp (np.sort (hdiag_orth)))
     t0 = log.timer ('LASSI get hdiag in orthogonal basis', *t0)
     hdiag_penalty = np.zeros_like (hdiag_orth)
-    if privilege_ref:
+    if privilege_ref and not use_spin_projector:
         # Force the reference state to appear in the first (few?) guess vectors
         i = raw2orth.get_ref_man_size ()
         if (i>0) and (i < len (hdiag_orth)):
@@ -277,8 +305,9 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
                 penvalue = above - below + 0.001
                 log.debug ("Hdiag penalty value: %17.10e", penvalue)
                 hdiag_penalty[i:] = penvalue
-    if use_spin_penalty:
-        # The pspace Hamiltonian does not contain the matrix-free spin penalty.
+    if use_spin_projector:
+        # pspace_ham expects addresses in the ordinary orthogonal basis, not
+        # coordinates in the numerically projected spin basis.
         pspace_size = 0
     if pspace_size:
         pw, pv, addr = pspace (hdiag_orth, h_op_raw, raw2orth, opt, pspace_size, log=log,
@@ -295,20 +324,18 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
         precond_op = lib.make_diag_precond (hdiag_orth, level_shift=level_shift)
     if si0 is not None:
         x0 = sisolver.project_init_guess (si0, raw2orth, s2_op, ovlp_op)
+        if use_spin_projector:
+            x0 = spin2orth.conj ().T @ x0
     else:
         x0 = None
     x0 = sisolver.get_init_guess (hdiag_orth, nroots, x0, log=log, penalty=hdiag_penalty)
     def h_op (x):
+        if use_spin_projector:
+            x = spin2orth @ x
         hx = raw2orth (h_op_raw (orth2raw (x)))
-        if use_spin_penalty:
-            def s2_orth (y):
-                return raw2orth (s2_op (orth2raw (y)))
-            s2err = s2_orth (x) - target_s2*x
-            hx += spin_penalty * (s2_orth (s2err) - target_s2*s2err)
+        if use_spin_projector:
+            hx = spin2orth.conj ().T @ hx
         return hx
-    if use_spin_penalty:
-        log.info ('Targeting spin multiplicity %d with a %.6g Eh S^2 penalty',
-                  smult, spin_penalty)
     log.info ("LASSI E(const) = %15.10f", e0)
     conv, e, x1 = lib.davidson1 (lambda xs: [h_op (x) for x in xs],
                                  x0, precond_op, nroots=nroots,
@@ -316,12 +343,8 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
                                  max_space=max_space, tol=conv_tol)
     conv = all (conv)
     if not conv: log.warn ('LASSI Davidson diagonalization not converged')
-    # Penalized eigenvalues are not physical energies. Evaluate H itself for
-    # the converged vectors before returning.
-    if use_spin_penalty:
-        e = np.asarray ([np.dot (x.conj (),
-                         raw2orth (h_op_raw (orth2raw (x))))
-                         for x in x1]).real
+    if use_spin_projector:
+        x1 = [spin2orth @ x for x in x1]
     si1 = np.stack ([orth2raw (x) for x in x1], axis=-1)
     s2 = np.array ([np.dot (x.conj (), s2_op (x)) for x in si1.T])
     return conv, e, si1, s2
