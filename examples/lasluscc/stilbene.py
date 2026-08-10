@@ -1,13 +1,9 @@
-"""LAS-LUSCC for stilbene along the central-dihedral coordinate.
+"""LAS-LUSCC for stilbene at a 90-degree central dihedral.
 
 The active space is split into the two phenyl pi systems and the central
 ethylene pi bond.  A small, gradient-selected cluster expansion keeps this
 larger demonstration tractable.
 """
-
-import argparse
-import json
-from pathlib import Path
 
 import numpy as np
 from pyscf import gto, scf
@@ -24,31 +20,40 @@ def select_largest(a_idxs, i_idxs, gradients, fraction):
     return [a_idxs[i] for i in order], [i_idxs[i] for i in order]
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--geometry", type=int, choices=(1, 60, 90, 120, 180),
-                    default=90)
-parser.add_argument("--state", choices=("singlet", "triplet"),
-                    default="singlet")
-parser.add_argument("--fraction", type=float, default=0.01)
-parser.add_argument("--geometry-dir", type=Path)
-args = parser.parse_args()
-
-if args.geometry_dir is None:
-    args.geometry_dir = (Path(__file__).resolve().parents[3]
-                         / "lsi-uscc" / "tasks" / "geom")
-geometry_tag = "stil001" if args.geometry == 1 else f"stil{args.geometry}"
-geometry_path = args.geometry_dir / f"{geometry_tag}.xyz"
-xyz = geometry_path.read_text()
-is_triplet = args.state == "triplet"
-
 mol = gto.M(
-    atom=xyz,
+    atom="""
+C    0.6125    1.4765    0.3848
+C    1.7122    0.6592    0.1075
+C    1.6193   -0.3700   -0.8716
+C    2.6863   -1.2100   -1.1127
+C    3.8573   -1.0936   -0.3748
+C    3.9580   -0.1107    0.6137
+C    2.9212    0.7529    0.8468
+C   -0.6119    1.4761   -0.3851
+C   -1.7119    0.6593   -0.1078
+C   -1.6198   -0.3689    0.8740
+C   -2.6870   -1.2090    1.1136
+C   -3.8575   -1.0930    0.3753
+C   -3.9574   -0.1113   -0.6152
+C   -2.9205    0.7520   -0.8478
+H    0.6927    2.1481    1.2377
+H    0.6835   -0.5004   -1.3996
+H    2.5990   -1.9861   -1.8614
+H    4.6835   -1.7822   -0.5455
+H    4.8743   -0.0269    1.1961
+H    3.0071    1.5194    1.6083
+H   -0.6921    2.1457   -1.2397
+H   -0.6847   -0.4983    1.3997
+H   -2.6003   -1.9830    1.8628
+H   -4.6839   -1.7811    0.5458
+H   -4.8731   -0.0284   -1.1968
+H   -3.0060    1.5174   -1.6112
+    """,
     basis="6-31g",
-    spin=2 if is_triplet else 0,
     max_memory=400_000,
     verbose=4,
 )
-mf = (scf.ROHF(mol) if is_triplet else scf.RHF(mol)).run()
+mf = scf.RHF(mol).run()
 
 ncas_sub = (4, 2, 4)
 nelecas_sub = (4, 2, 4)
@@ -57,15 +62,14 @@ frag_atoms = (
     (0, 7, 14, 20),
     (8, 9, 10, 11, 12, 13, 21, 22, 23, 24, 25),
 )
-spin_sub = (1, 3, 1) if is_triplet else (1, 1, 1)
-las = LASSCF(mf, ncas_sub, nelecas_sub, spin_sub=spin_sub)
+las = LASSCF(mf, ncas_sub, nelecas_sub, spin_sub=(1, 1, 1))
 mo_guess = las.localize_init_guess(frag_atoms, mf.mo_coeff)
 las.kernel(mo_guess)
 
 e_lassis, _ = lassi.LASSIS(las).kernel()
 gradients, _, a_idxs, i_idxs = get_grad_exact(las)
 a_selected, i_selected = select_largest(
-    a_idxs, i_idxs, gradients, fraction=args.fraction
+    a_idxs, i_idxs, gradients, fraction=0.01
 )
 luscc = LUSCC(las, a_selected, i_selected)
 e_luscc, _ = luscc.kernel()
@@ -79,13 +83,3 @@ print(f"LAS-LUSCC energy: {e_luscc[0]:.12f}")
 print(f"LAS-LUSCC <S^2>:  {s2:.12f}")
 print(f"LAS-LUSCC 2S+1:   {multiplicity:.12f}")
 print(f"Selected {len(a_selected)} of {len(a_idxs)} excitations")
-print("RESULT " + json.dumps({
-    "geometry": args.geometry,
-    "state": args.state,
-    "fraction": args.fraction,
-    "nselected": len(a_selected),
-    "ntotal": len(a_idxs),
-    "energy": float(e_luscc[0]),
-    "s2": s2,
-    "multiplicity": float(multiplicity),
-}, sort_keys=True))
