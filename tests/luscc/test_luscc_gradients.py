@@ -2,10 +2,8 @@ import numpy as np
 from pyscf import fci
 
 from mrh.exploratory.luscc import get_grad_exact_lassi
-from mrh.exploratory.luscc.excitations import (
-    apply_operator_string_fci,
-    generate_interfragment_excitations,
-)
+from mrh.exploratory.luscc.excitations import apply_operator_string_fci
+from mrh.exploratory.unitary_cc import lasuccsd
 from mrh.my_pyscf.lassi import op_o0
 
 
@@ -25,8 +23,9 @@ def _excitation_ops(creation, annihilation, norb):
 def test_lassis_gradients_equal_full_ci_commutators(h4_lassis):
     """Check the RDM gradient against an explicit full-CAS commutator."""
     gradients, _, _, _ = get_grad_exact_lassi(h4_lassis)
-    a_idxs, i_idxs = generate_interfragment_excitations(
+    uop = lasuccsd.gen_uccsd_op(
         h4_lassis.ncas, h4_lassis.ncas_sub)
+    a_idxs, i_idxs = uop.a_idxs, uop.i_idxs
 
     # Reconstruct the mLAS eigenvector in the full-CAS determinant basis. This
     # deliberately bypasses the spin-resolved 1-, 2-, and 3-RDM contractions

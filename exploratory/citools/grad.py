@@ -70,10 +70,6 @@ def make_casrdm123s_lassi(lsi, state=0):
 
 def get_grad_exact_lassi(lsi, state=0, epsilon=0.0):
     """Calculate all LUSCC excitation gradients for a LASSI eigenstate."""
-    from mrh.exploratory.luscc.excitations import (
-        generate_interfragment_excitations,
-    )
-
     las = lsi._las
     rdm1, rdm2, rdm3 = make_casrdm123s_lassi(lsi, state=state)
     nmo, ncas, ncore = las.mo_coeff.shape[1], las.ncas, las.ncore
@@ -82,7 +78,8 @@ def get_grad_exact_lassi(lsi, state=0, epsilon=0.0):
         las.get_h2eff().reshape(nmo*ncas, ncas*(ncas+1)//2)
     ).reshape(nmo, ncas, ncas, ncas)[ncore:nocc]
     h1, _ = las.h1e_for_cas(mo_coeff=las.mo_coeff)
-    a_idxs, i_idxs = generate_interfragment_excitations(ncas, las.ncas_sub)
+    uop = lasuccsd.gen_uccsd_op(ncas, las.ncas_sub)
+    a_idxs, i_idxs = uop.a_idxs, uop.i_idxs
     gradients = np.concatenate((
         get_grad_h1t1(a_idxs, i_idxs, rdm1, h1)
         + get_grad_h2t1(a_idxs, i_idxs, rdm2, h2),
