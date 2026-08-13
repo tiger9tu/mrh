@@ -1,5 +1,7 @@
 import numpy as np
+from unittest import mock
 from pyscf import fci
+from pyscf import lib
 from scipy import linalg
 
 from mrh.exploratory.luscc import LUSCC
@@ -68,3 +70,19 @@ def test_h4_luscc_energy(h4_las):
         h4_las, creation=2, annihilation=0)
     np.testing.assert_allclose(energy[0], reference_energy, atol=1e-10)
     assert energy[0] <= h4_las.e_tot + 1e-10
+
+
+def test_h4_luscc_exact_singlet(h4_las):
+    with mock.patch.object(lib, "davidson1", wraps=lib.davidson1) as davidson:
+        energy, coeff, s2, residual = LUSCC(
+            h4_las, a_idxs=[], i_idxs=[], target_spin=0).kernel()
+    davidson.assert_called_once()
+    assert coeff.shape == (1, 1)
+    np.testing.assert_allclose(energy[0], h4_las.e_tot, atol=1e-9)
+    np.testing.assert_allclose(s2[0], 0.0, atol=1e-10)
+    np.testing.assert_allclose(residual[0], 0.0, atol=1e-10)
+
+
+def test_exact_spin_reports_absent_target(h4_las):
+    with np.testing.assert_raises_regex(ValueError, "No exact total-spin S=1"):
+        LUSCC(h4_las, a_idxs=[], i_idxs=[], target_spin=1).kernel()

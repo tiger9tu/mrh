@@ -8,6 +8,7 @@ from mrh.my_pyscf.lassi import LASSI
 from mrh.my_pyscf.mcscf.addons import state_average_n_mix, get_h1e_zipped_fcisolver
 
 from .excitations import apply_operator_string_fci
+from .spin import exact_spin_basis, residual_gram
 
 
 class LUSCC(LASSI):
@@ -25,11 +26,16 @@ class LUSCC(LASSI):
 
     def __init__(self, las_or_lsi, a_idxs, i_idxs, state=0, threshold=0.01,
                  top_m=None, opt=1, smult_si=None, share_spectator_ci=False,
-                 **kwargs):
+                 target_spin=None, spin_tol=1e-10, lin_dep_tol=1e-10, **kwargs):
         self.a_idxs = a_idxs
         self.i_idxs = i_idxs
         self._smult_si = smult_si
         self._share_spectator_ci = bool(share_spectator_ci)
+        self.target_spin = target_spin
+        self.spin_tol = spin_tol
+        self.lin_dep_tol = lin_dep_tol
+        self.spin_residual_norm = None
+        self.spin_residual_eigenvalues = None
 
         if isinstance(las_or_lsi, LASSI):
             self._ref_lsi = las_or_lsi
@@ -207,10 +213,47 @@ class LUSCC(LASSI):
     def kernel(self, **kwargs):
         """Build the LUSCC states and delegate the complete solve to LASSI."""
         self.prepare_states_()
+        if self.target_spin is not None:
+            if self._smult_si is not None or kwargs.get("smult_si") is not None:
+                raise ValueError("Use either target_spin=S or smult_si, not both")
+            return self._kernel_exact_spin(**kwargs)
         if self._smult_si is not None:
             kwargs.setdefault("smult_si", self._smult_si)
             kwargs.setdefault("davidson_only", True)
         return super().kernel(**kwargs)
+
+    def _kernel_exact_spin(self, **kwargs):
+        """Diagonalize in the exact null space of (S^2-S(S+1))."""
+        from mrh.my_pyscf.lassi import op_o1
+
+        unsupported = set(kwargs) - {"mo_coeff", "veff_c", "h2eff_sub"}
+        if unsupported:
+            raise TypeError("Unsupported exact-spin kernel options: "
+                            + ", ".join(sorted(unsupported)))
+        h0, h1, h2 = self.ham_2q(
+            mo_coeff=kwargs.get("mo_coeff"), veff_c=kwargs.get("veff_c"),
+            h2eff_sub=kwargs.get("h2eff_sub"))
+        # LUSCC fragment vectors can be spin impure, so do not pass fragment
+        # multiplicities (and do not invoke the Clebsch--Gordan basis path).
+        hop, s2op, mop = op_o1.gen_contract_op_si_hdiag(
+            self, h1, h2, self.ci, self.get_nelec_frs(), smult_fr=None,
+            disc_fr=self.get_disc_fr())[:3]
+        identity = np.eye(hop.shape[0])
+        overlap = np.asarray(mop(identity))
+        residual = residual_gram(self, self.target_spin)
+        spin_basis, keig = exact_spin_basis(
+            overlap, residual, self.target_spin,
+            lin_dep_tol=self.lin_dep_tol, spin_tol=self.spin_tol)
+        converged, energy, coeff, s2 = self.sisolver.kernel_projected(
+            hop, s2op, spin_basis, nroots=1)
+        self.converged = self.converged and converged
+        self.e_roots = energy + h0
+        self.si = coeff
+        self.s2 = s2
+        self.spin_residual_norm = np.sqrt(np.maximum(0.0, np.real(
+            np.einsum("ip,ij,jp->p", coeff.conj(), residual, coeff))))
+        self.spin_residual_eigenvalues = keig
+        return self.e_roots, self.si, self.s2, self.spin_residual_norm
 
     def filter_spaces(self, las):
         return las
